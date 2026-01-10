@@ -1,0 +1,13 @@
+[Unit]
+Description=Feeder - RSS/Atom feed notifier
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/feeder
+ExecStart=/opt/feeder/feeder run
+EnvironmentFile=/opt/feeder/.env
+
+[Install]
+WantedBy=multi-user.target

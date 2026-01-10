@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Feeder every 120 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=120min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

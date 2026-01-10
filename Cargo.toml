@@ -1,6 +1,46 @@
 [package]
 name = "feeder"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
+description = "Multi-source feed aggregator with Notebrook notifications"
+authors = ["Oriol Gomez"]
 
 [dependencies]
+# CLI
+clap = { version = "4.5", features = ["derive", "env"] }
+
+# Feed parsing
+feed-rs = "2.3"
+opml = "1.1"
+
+# HTTP client (using rustls to avoid OpenSSL dependency)
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+
+# Database
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Environment/config
+dotenvy = "0.15"
+
+# Notebrook integration (local library)
+channels = { path = "lib" }
+
+# Utilities
+chrono = { version = "0.4", features = ["serde"] }
+url = "2.5"
+scraper = "0.22"
+regex = "1.10"
+
+[dev-dependencies]
+mockall = "0.13"
+tempfile = "3.14"
+assert_cmd = "2.0"
+predicates = "3.1"
