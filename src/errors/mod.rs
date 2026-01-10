@@ -55,11 +55,17 @@ pub enum FeederError {
     // Channel errors from notebrook library
     #[error("Channel error: {0}")]
     Channel(String),
+
+    #[error("Payload too large")]
+    PayloadTooLarge,
 }
 
 impl From<channels::ChannelError> for FeederError {
     fn from(err: channels::ChannelError) -> Self {
-        FeederError::Channel(err.to_string())
+        match err {
+            channels::ChannelError::PayloadTooLarge => FeederError::PayloadTooLarge,
+            _ => FeederError::Channel(err.to_string()),
+        }
     }
 }
 
