@@ -17,7 +17,7 @@ A multi-source feed aggregator CLI that sends new articles to [Notebrook](https:
 ### From Source
 
 ```bash
-git clone https://github.com/yourusername/feeder.git
+git clone https://github.com/ogomez92/feeder.git
 cd feeder
 cargo build --release
 ```
