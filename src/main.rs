@@ -229,10 +229,56 @@ fn cmd_run(
     let results = fetch_service.fetch_all_unnotified()?;
 
     if results.is_empty() {
+        println!("No feeds configured.");
+        return Ok(());
+    }
+
+    // Display fetch results for each feed
+    let mut error_count = 0;
+    let mut total_new = 0;
+    let mut feeds_with_new = 0;
+
+    for result in &results {
+        if result.is_error() {
+            println!(
+                "  {}: error: {}",
+                result.feed.title,
+                result.error.as_ref().unwrap()
+            );
+            error_count += 1;
+        } else if result.has_new_articles() {
+            println!(
+                "  {}: fetched {} articles, {} new",
+                result.feed.title,
+                result.total_articles,
+                result.new_articles.len()
+            );
+            total_new += result.new_articles.len();
+            feeds_with_new += 1;
+        } else {
+            println!(
+                "  {}: fetched {} articles, 0 new",
+                result.feed.title, result.total_articles
+            );
+        }
+    }
+
+    println!();
+
+    // Summary line
+    if error_count > 0 {
+        println!(
+            "Found {} new articles from {} feeds ({} errors).\n",
+            total_new, feeds_with_new, error_count
+        );
+    } else if total_new > 0 {
+        println!("Found {} new articles from {} feeds.\n", total_new, feeds_with_new);
+    } else {
         println!("No new articles to notify.");
         return Ok(());
     }
 
+    // Process notifications
     let notification_service = if !dry_run {
         Some(NotificationService::new(config)?)
     } else {
@@ -241,7 +287,14 @@ fn cmd_run(
 
     let mut total_notified = 0;
 
-    for (feed, articles) in &results {
+    for result in &results {
+        if !result.has_new_articles() {
+            continue;
+        }
+
+        let feed = &result.feed;
+        let articles = &result.new_articles;
+
         println!("{} ({} new articles):", feed.title, articles.len());
 
         // Track which articles were successfully notified
@@ -279,10 +332,7 @@ fn cmd_run(
     }
 
     if dry_run {
-        println!(
-            "Dry run complete. Would notify {} articles.",
-            results.iter().map(|(_, a)| a.len()).sum::<usize>()
-        );
+        println!("Dry run complete. Would notify {} articles.", total_new);
     } else {
         println!("Notified {} articles.", total_notified);
     }

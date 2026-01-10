@@ -3,6 +3,42 @@ use crate::errors::FeederResult;
 use crate::sources::SourceRegistry;
 use crate::storage::traits::{ArticleCacheRepository, FeedRepository};
 
+/// Result of fetching a single feed
+pub struct FetchResult {
+    pub feed: Feed,
+    pub total_articles: usize,
+    pub new_articles: Vec<Article>,
+    pub error: Option<String>,
+}
+
+impl FetchResult {
+    pub fn success(feed: Feed, total_articles: usize, new_articles: Vec<Article>) -> Self {
+        Self {
+            feed,
+            total_articles,
+            new_articles,
+            error: None,
+        }
+    }
+
+    pub fn error(feed: Feed, error: String) -> Self {
+        Self {
+            feed,
+            total_articles: 0,
+            new_articles: Vec::new(),
+            error: Some(error),
+        }
+    }
+
+    pub fn has_new_articles(&self) -> bool {
+        !self.new_articles.is_empty()
+    }
+
+    pub fn is_error(&self) -> bool {
+        self.error.is_some()
+    }
+}
+
 pub struct FetchService<F: FeedRepository, C: ArticleCacheRepository> {
     feed_repository: F,
     cache_repository: C,
@@ -22,9 +58,10 @@ impl<F: FeedRepository, C: ArticleCacheRepository> FetchService<F, C> {
         }
     }
 
-    /// Fetch articles from a single feed and return unnotified ones
-    pub fn fetch_unnotified(&self, feed: &Feed) -> FeederResult<Vec<Article>> {
+    /// Fetch articles from a single feed and return (total_count, unnotified_articles)
+    pub fn fetch_unnotified(&self, feed: &Feed) -> FeederResult<(usize, Vec<Article>)> {
         let articles = self.source_registry.fetch_articles(feed)?;
+        let total_count = articles.len();
 
         // Generate cache keys for all articles
         let cache_keys: Vec<String> = articles
@@ -41,7 +78,7 @@ impl<F: FeedRepository, C: ArticleCacheRepository> FetchService<F, C> {
             .filter(|a| unnotified_keys.contains(&a.cache_key(&feed.title)))
             .collect();
 
-        Ok(unnotified_articles)
+        Ok((total_count, unnotified_articles))
     }
 
     /// Mark articles as notified
@@ -59,22 +96,18 @@ impl<F: FeedRepository, C: ArticleCacheRepository> FetchService<F, C> {
         Ok(())
     }
 
-    /// Fetch all feeds and return unnotified articles with their feeds
-    pub fn fetch_all_unnotified(&self) -> FeederResult<Vec<(Feed, Vec<Article>)>> {
+    /// Fetch all feeds and return detailed results for each
+    pub fn fetch_all_unnotified(&self) -> FeederResult<Vec<FetchResult>> {
         let feeds = self.feed_repository.get_all()?;
         let mut results = Vec::new();
 
         for feed in feeds {
             match self.fetch_unnotified(&feed) {
-                Ok(articles) if !articles.is_empty() => {
-                    results.push((feed, articles));
-                }
-                Ok(_) => {
-                    // No new articles
+                Ok((total, articles)) => {
+                    results.push(FetchResult::success(feed, total, articles));
                 }
                 Err(e) => {
-                    // Log error but continue with other feeds
-                    eprintln!("Error fetching {}: {}", feed.title, e);
+                    results.push(FetchResult::error(feed, e.to_string()));
                 }
             }
         }
