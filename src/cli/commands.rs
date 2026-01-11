@@ -41,5 +41,9 @@ pub enum Commands {
         /// Dry run - don't send notifications, just show what would be sent
         #[arg(long)]
         dry_run: bool,
+
+        /// Skip notifications but still mark articles as seen in the database
+        #[arg(long)]
+        skip_notify: bool,
     },
 }

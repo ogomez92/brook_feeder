@@ -51,6 +51,10 @@ feeder run
 # Dry run (show what would be sent)
 feeder run --dry-run
 
+# Skip notifications but mark articles as seen
+# Useful after adding a feed to avoid notifications for old articles
+feeder run --skip-notify
+
 # Import/export OPML
 feeder import feeds.opml
 feeder export -o feeds.opml

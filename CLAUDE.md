@@ -10,6 +10,8 @@ cargo build --release    # Release build
 cargo test               # Run all tests
 cargo test <test_name>   # Run specific test
 cargo run -- <command>   # Run CLI (e.g., cargo run -- list)
+cargo run -- run --dry-run      # Preview notifications without sending
+cargo run -- run --skip-notify  # Mark articles as seen without notifying
 ```
 
 ## Architecture

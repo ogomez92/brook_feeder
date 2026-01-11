@@ -39,8 +39,8 @@ fn run() -> FeederResult<()> {
         Commands::List => cmd_list(feed_repo),
         Commands::Import { path } => cmd_import(&path, feed_repo, source_registry),
         Commands::Export { output } => cmd_export(feed_repo, source_registry, output),
-        Commands::Run { dry_run } => {
-            cmd_run(feed_repo, cache_repo, source_registry, &config, dry_run)
+        Commands::Run { dry_run, skip_notify } => {
+            cmd_run(feed_repo, cache_repo, source_registry, &config, dry_run, skip_notify)
         }
     }
 }
@@ -221,10 +221,15 @@ fn cmd_run(
     source_registry: SourceRegistry,
     config: &Config,
     dry_run: bool,
+    skip_notify: bool,
 ) -> FeederResult<()> {
     let fetch_service = FetchService::new(feed_repo, cache_repo, source_registry);
 
-    println!("Fetching feeds...\n");
+    if skip_notify {
+        println!("Fetching feeds (skip-notify mode)...\n");
+    } else {
+        println!("Fetching feeds...\n");
+    }
 
     let results = fetch_service.fetch_all_unnotified()?;
 
@@ -279,7 +284,7 @@ fn cmd_run(
     }
 
     // Process notifications
-    let notification_service = if !dry_run {
+    let notification_service = if !dry_run && !skip_notify {
         Some(NotificationService::new(config)?)
     } else {
         None
@@ -305,6 +310,10 @@ fn cmd_run(
 
             if dry_run {
                 println!("  [DRY RUN] {}", notification.format());
+            } else if skip_notify {
+                println!("  [SKIP] {}", notification.article_title);
+                total_notified += 1;
+                notified_articles.push(article.clone());
             } else {
                 print!("  Sending: {}... ", notification.article_title);
                 io::stdout().flush()?;
@@ -323,7 +332,7 @@ fn cmd_run(
             }
         }
 
-        // Only mark successfully notified articles
+        // Mark articles as notified (skip_notify marks without sending, normal marks after sending)
         if !dry_run && !notified_articles.is_empty() {
             fetch_service.mark_notified(feed, &notified_articles)?;
         }
@@ -333,6 +342,8 @@ fn cmd_run(
 
     if dry_run {
         println!("Dry run complete. Would notify {} articles.", total_new);
+    } else if skip_notify {
+        println!("Marked {} articles as seen (notifications skipped).", total_notified);
     } else {
         println!("Notified {} articles.", total_notified);
     }
