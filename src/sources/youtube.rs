@@ -90,6 +90,22 @@ impl YouTubeSource {
             channel_id
         )
     }
+
+    /// Normalize the channel URL by stripping tab paths like /videos, /shorts, /streams
+    /// e.g., https://youtube.com/@user/videos -> https://youtube.com/@user
+    fn normalize_channel_url(&self, url: &str) -> String {
+        // YouTube tab paths that should be stripped
+        let tab_paths = ["/videos", "/shorts", "/streams", "/playlists", "/community", "/channels", "/about", "/featured"];
+
+        let mut normalized = url.to_string();
+        for path in tab_paths {
+            if normalized.ends_with(path) {
+                normalized = normalized[..normalized.len() - path.len()].to_string();
+                break;
+            }
+        }
+        normalized
+    }
 }
 
 impl Default for YouTubeSource {
@@ -111,8 +127,20 @@ impl FeedSource for YouTubeSource {
     }
 
     fn validate(&self, url: &str) -> FeederResult<FeedMetadata> {
-        let channel_id = self.extract_channel_id(url)?;
+        // Normalize the URL by stripping tab paths like /videos, /shorts, /streams, etc.
+        let normalized_url = self.normalize_channel_url(url);
+        let channel_id = self.extract_channel_id(&normalized_url)?;
         let feed_url = self.build_feed_url(&channel_id);
+
+        // Check if the feed URL returns a successful response before trying to parse
+        let response = self.client.get(&feed_url).send()?;
+        if !response.status().is_success() {
+            return Err(FeederError::FeedValidation(format!(
+                "YouTube RSS feed not available for this channel (HTTP {}). \
+                Some channels may not have RSS feeds enabled.",
+                response.status().as_u16()
+            )));
+        }
 
         // Use the RSS source to validate the feed
         let mut metadata = self.rss_source.validate(&feed_url)?;
@@ -156,6 +184,60 @@ mod tests {
         assert_eq!(
             feed_url,
             "https://www.youtube.com/feeds/videos.xml?channel_id=UCxxxxxxxxxxxxxxxxxxxxxxx"
+        );
+    }
+
+    #[test]
+    fn test_normalize_channel_url_strips_videos() {
+        let source = YouTubeSource::new();
+        assert_eq!(
+            source.normalize_channel_url("https://www.youtube.com/@username/videos"),
+            "https://www.youtube.com/@username"
+        );
+    }
+
+    #[test]
+    fn test_normalize_channel_url_strips_shorts() {
+        let source = YouTubeSource::new();
+        assert_eq!(
+            source.normalize_channel_url("https://www.youtube.com/@username/shorts"),
+            "https://www.youtube.com/@username"
+        );
+    }
+
+    #[test]
+    fn test_normalize_channel_url_strips_streams() {
+        let source = YouTubeSource::new();
+        assert_eq!(
+            source.normalize_channel_url("https://www.youtube.com/@username/streams"),
+            "https://www.youtube.com/@username"
+        );
+    }
+
+    #[test]
+    fn test_normalize_channel_url_strips_playlists() {
+        let source = YouTubeSource::new();
+        assert_eq!(
+            source.normalize_channel_url("https://www.youtube.com/@username/playlists"),
+            "https://www.youtube.com/@username"
+        );
+    }
+
+    #[test]
+    fn test_normalize_channel_url_preserves_clean_url() {
+        let source = YouTubeSource::new();
+        assert_eq!(
+            source.normalize_channel_url("https://www.youtube.com/@username"),
+            "https://www.youtube.com/@username"
+        );
+    }
+
+    #[test]
+    fn test_normalize_channel_url_with_channel_id() {
+        let source = YouTubeSource::new();
+        assert_eq!(
+            source.normalize_channel_url("https://www.youtube.com/channel/UCxxx/videos"),
+            "https://www.youtube.com/channel/UCxxx"
         );
     }
 }
