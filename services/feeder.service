@@ -5,9 +5,9 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-WorkingDirectory=/opt/feeder
-ExecStart=/opt/feeder/feeder run
-EnvironmentFile=/opt/feeder/.env
+WorkingDirectory=/home/feeder
+ExecStart=/home/feeder/feeder run
+EnvironmentFile=/home/feeder/.env
 
 [Install]
 WantedBy=multi-user.target

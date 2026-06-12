@@ -57,11 +57,13 @@ Environment variables loaded from `.env`:
 
 Service files in `services/` for running as a scheduled task:
 
+The service runs from `/home/feeder` (the repo checkout). After a rebuild,
+refresh the binary the timer runs:
+
 ```bash
-# Install to /opt/feeder
-sudo mkdir -p /opt/feeder
-sudo cp target/release/feeder /opt/feeder/
-sudo cp .env feeder.db /opt/feeder/
+# Deploy the freshly built binary
+cargo build --release
+cp target/release/feeder /home/feeder/feeder
 
 # Install and enable timer (runs every 120 min)
 sudo cp services/feeder.service services/feeder.timer /etc/systemd/system/
