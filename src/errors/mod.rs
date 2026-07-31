@@ -29,9 +29,16 @@ pub enum FeederError {
     #[error("HTTP request failed: {0}")]
     Http(#[from] reqwest::Error),
 
+    // GitHub / release tracking errors
+    #[error("GitHub API error: {0}")]
+    Github(String),
+
     // Parsing errors
     #[error("Feed parsing failed: {0}")]
     FeedParse(String),
+
+    #[error("JSON parsing failed: {0}")]
+    JsonParse(String),
 
     #[error("OPML parsing failed: {0}")]
     OpmlParse(String),

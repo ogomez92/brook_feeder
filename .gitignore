@@ -1,4 +1,5 @@
 /target
+/feeder
 .env
 *.db
 *.opml

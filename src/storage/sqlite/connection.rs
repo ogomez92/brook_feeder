@@ -27,6 +27,28 @@ CREATE TABLE IF NOT EXISTS notified_articles (
 );
 
 CREATE INDEX IF NOT EXISTS idx_notified_articles_cache_key ON notified_articles(cache_key);
+
+CREATE TABLE IF NOT EXISTS tracked_repos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner TEXT NOT NULL,
+    name TEXT NOT NULL,
+    url TEXT NOT NULL UNIQUE,
+    added_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tracked_repos_owner_name
+    ON tracked_repos(owner COLLATE NOCASE, name COLLATE NOCASE);
+
+CREATE TABLE IF NOT EXISTS notified_releases (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cache_key TEXT NOT NULL UNIQUE,
+    repo_id INTEGER NOT NULL,
+    title TEXT,
+    notified_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (repo_id) REFERENCES tracked_repos(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_notified_releases_cache_key ON notified_releases(cache_key);
 "#;
 
 #[derive(Clone)]
@@ -37,6 +59,10 @@ pub struct SqliteStorage {
 impl SqliteStorage {
     pub fn new<P: AsRef<Path>>(path: P) -> FeederResult<Self> {
         let conn = Connection::open(path)?;
+        // Wait (up to 5s) rather than erroring when another feeder process (e.g.
+        // the feeds timer and the releases timer running at once) holds a write
+        // lock. Keeps silent scheduled runs from aborting on transient locks.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         conn.execute_batch(SCHEMA)?;
 

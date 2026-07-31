@@ -1,4 +1,4 @@
-use crate::domain::Feed;
+use crate::domain::{Feed, TrackedRepo};
 use crate::errors::FeederResult;
 
 #[cfg_attr(test, mockall::automock)]
@@ -16,4 +16,19 @@ pub trait ArticleCacheRepository: Send + Sync {
     fn is_notified(&self, cache_key: &str) -> FeederResult<bool>;
     fn mark_notified(&self, cache_key: &str, feed_id: i64, title: &str) -> FeederResult<()>;
     fn get_unnotified(&self, cache_keys: &[String]) -> FeederResult<Vec<String>>;
+}
+
+#[cfg_attr(test, mockall::automock)]
+pub trait RepoRepository: Send + Sync {
+    fn add(&self, repo: &TrackedRepo) -> FeederResult<i64>;
+    fn remove(&self, id: i64) -> FeederResult<()>;
+    fn get_all(&self) -> FeederResult<Vec<TrackedRepo>>;
+    fn exists(&self, owner: &str, name: &str) -> FeederResult<bool>;
+}
+
+/// Dedup cache for repo releases/commits already notified.
+#[cfg_attr(test, mockall::automock)]
+pub trait ReleaseCacheRepository: Send + Sync {
+    fn is_notified(&self, cache_key: &str) -> FeederResult<bool>;
+    fn mark_notified(&self, cache_key: &str, repo_id: i64, title: &str) -> FeederResult<()>;
 }

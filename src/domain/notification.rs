@@ -1,4 +1,4 @@
-use super::{Article, Feed};
+use super::{Article, Feed, RepoUpdate, TrackedRepo};
 
 #[derive(Debug, Clone)]
 pub struct Notification {
@@ -17,6 +17,47 @@ impl Notification {
             article_title: article.title.clone(),
             text,
             links: article.links.clone(),
+        }
+    }
+
+    /// Build a notification for a tracked repo's latest release or commit.
+    /// Returns `None` when there is nothing to notify about.
+    ///
+    /// A release renders as `owner/name {releaseName}: {link}` and a commit as
+    /// `owner/name {commit subject} {link}`, reusing the same format shape as
+    /// article notifications.
+    ///
+    /// The release link points at `/releases/latest` rather than the tagged
+    /// release page, so opening an older notification still lands on the newest
+    /// release (and its assets).
+    pub fn from_repo_update(repo: &TrackedRepo, update: &RepoUpdate) -> Option<Self> {
+        match update {
+            RepoUpdate::Release(release) => {
+                let title = if release.name.trim().is_empty() {
+                    release.tag_name.clone()
+                } else {
+                    release.name.clone()
+                };
+                Some(Self {
+                    feed_title: repo.full_name(),
+                    article_title: format!("new release {}", title),
+                    text: String::new(),
+                    links: vec![format!(
+                        "https://github.com/{}/{}/releases/latest",
+                        repo.owner, repo.name
+                    )],
+                })
+            }
+            RepoUpdate::Commit(commit) => {
+                let subject = commit.message.lines().next().unwrap_or("").trim().to_string();
+                Some(Self {
+                    feed_title: repo.full_name(),
+                    article_title: "new commit".to_string(),
+                    text: subject,
+                    links: vec![commit.html_url.clone()],
+                })
+            }
+            RepoUpdate::None => None,
         }
     }
 
@@ -105,5 +146,59 @@ mod tests {
         assert_eq!(notification.article_title, "Test Article");
         assert_eq!(notification.text, "Article content");
         assert_eq!(notification.links, vec!["https://example.com/article"]);
+    }
+
+    #[test]
+    fn test_notification_from_release_links_to_latest() {
+        use crate::domain::{RepoRelease, RepoUpdate, TrackedRepo};
+
+        let repo = TrackedRepo::new(
+            "sveltejs".to_string(),
+            "kit".to_string(),
+            "https://github.com/sveltejs/kit".to_string(),
+        );
+        let update = RepoUpdate::Release(RepoRelease {
+            tag_name: "v1.2.3".to_string(),
+            name: "1.2.3".to_string(),
+            published_at: None,
+            html_url: "https://github.com/sveltejs/kit/releases/tag/v1.2.3".to_string(),
+            body: String::new(),
+        });
+
+        let notification = Notification::from_repo_update(&repo, &update).unwrap();
+
+        assert_eq!(
+            notification.links,
+            vec!["https://github.com/sveltejs/kit/releases/latest"]
+        );
+        assert_eq!(
+            notification.format(),
+            "sveltejs/kit new release 1.2.3 https://github.com/sveltejs/kit/releases/latest"
+        );
+    }
+
+    #[test]
+    fn test_notification_from_commit_keeps_commit_link() {
+        use crate::domain::{RepoCommit, RepoUpdate, TrackedRepo};
+
+        let repo = TrackedRepo::new(
+            "a".to_string(),
+            "b".to_string(),
+            "https://github.com/a/b".to_string(),
+        );
+        let update = RepoUpdate::Commit(RepoCommit {
+            sha: "abc123".to_string(),
+            message: "fix thing\n\ndetails".to_string(),
+            date: None,
+            author: "someone".to_string(),
+            html_url: "https://github.com/a/b/commit/abc123".to_string(),
+        });
+
+        let notification = Notification::from_repo_update(&repo, &update).unwrap();
+
+        assert_eq!(
+            notification.links,
+            vec!["https://github.com/a/b/commit/abc123"]
+        );
     }
 }

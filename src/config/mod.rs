@@ -6,6 +6,8 @@ pub struct Config {
     pub notebrook_token: String,
     pub notebrook_channel: String,
     pub db_path: String,
+    /// GitHub token used for release tracking (private repos + higher rate limits)
+    pub github_token: Option<String>,
 }
 
 impl Config {
@@ -45,11 +47,40 @@ impl Config {
                 .unwrap_or_else(|| "./feeder.db".to_string())
         });
 
+        let github_token = Self::resolve_github_token();
+
         Ok(Self {
             notebrook_url,
             notebrook_token,
             notebrook_channel,
             db_path,
+            github_token,
         })
+    }
+
+    /// Resolve the GitHub token: `GITHUB_TOKEN` env var first, then fall back to
+    /// the `gh` CLI (`gh auth token`) so it works out of the box on a machine
+    /// already logged in with the GitHub CLI.
+    fn resolve_github_token() -> Option<String> {
+        if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+            let token = token.trim().to_string();
+            if !token.is_empty() {
+                return Some(token);
+            }
+        }
+
+        std::process::Command::new("gh")
+            .args(["auth", "token"])
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .and_then(|out| {
+                let token = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if token.is_empty() {
+                    None
+                } else {
+                    Some(token)
+                }
+            })
     }
 }

@@ -27,6 +27,7 @@ impl RssAtomSource {
     pub fn new() -> Self {
         Self {
             client: Client::builder()
+                .user_agent("feeder/1.0 (+https://github.com/feeder)")
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .unwrap_or_else(|_| Client::new()),
