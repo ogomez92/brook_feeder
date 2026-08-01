@@ -40,12 +40,8 @@ impl Config {
         let notebrook_channel = std::env::var("NOTEBROOK_CHANNEL")
             .unwrap_or_else(|_| "feeds".to_string());
 
-        // Default db_path is relative to executable directory
-        let db_path = std::env::var("FEEDER_DB_PATH").unwrap_or_else(|_| {
-            exe_dir
-                .map(|d| d.join("feeder.db").to_string_lossy().into_owned())
-                .unwrap_or_else(|| "./feeder.db".to_string())
-        });
+        let db_path = std::env::var("FEEDER_DB_PATH")
+            .unwrap_or_else(|_| Self::default_db_path(exe_dir.as_deref()));
 
         let github_token = Self::resolve_github_token();
 
@@ -56,6 +52,30 @@ impl Config {
             db_path,
             github_token,
         })
+    }
+
+    /// Locate the database when `FEEDER_DB_PATH` is unset.
+    ///
+    /// Prefers an existing `feeder.db` in the current directory — that is what the
+    /// docs promise and what the systemd unit's `WorkingDirectory` points at. Only
+    /// falls back to one sitting next to the executable, and never *creates* one
+    /// there: `current_exe()` resolves symlinks, so for a deployment that symlinks
+    /// `feeder -> target/release/feeder` the exe directory is a build artifact
+    /// directory. Creating the database there silently strands the real one and the
+    /// run reports "No feeds configured" while still exiting 0.
+    fn default_db_path(exe_dir: Option<&std::path::Path>) -> String {
+        let cwd_db = std::path::Path::new("feeder.db");
+        if cwd_db.exists() {
+            return "./feeder.db".to_string();
+        }
+
+        if let Some(exe_db) = exe_dir.map(|d| d.join("feeder.db")) {
+            if exe_db.exists() {
+                return exe_db.to_string_lossy().into_owned();
+            }
+        }
+
+        "./feeder.db".to_string()
     }
 
     /// Resolve the GitHub token: `GITHUB_TOKEN` env var first, then fall back to
