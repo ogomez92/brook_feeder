@@ -1,4 +1,4 @@
-use crate::domain::{Feed, TrackedRepo};
+use crate::domain::{ArtifactStatus, Feed, ModArtifact, ModArtifactRecord, TrackedRepo};
 use crate::errors::FeederResult;
 
 #[cfg_attr(test, mockall::automock)]
@@ -31,4 +31,21 @@ pub trait RepoRepository: Send + Sync {
 pub trait ReleaseCacheRepository: Send + Sync {
     fn is_notified(&self, cache_key: &str) -> FeederResult<bool>;
     fn mark_notified(&self, cache_key: &str, repo_id: i64, title: &str) -> FeederResult<()>;
+}
+
+/// Inventory of mod-registry artifacts: doubles as the dedup cache (a known
+/// `cache_key` is never announced twice) and as the record of what is mirrored
+/// on disk.
+///
+/// Not `automock`ed: the borrowed `local_path` needs a named lifetime that
+/// mockall can't infer, and the tests here run against real in-memory SQLite.
+pub trait ModArtifactRepository: Send + Sync {
+    fn get(&self, cache_key: &str) -> FeederResult<Option<ModArtifactRecord>>;
+    fn record(
+        &self,
+        artifact: &ModArtifact,
+        status: ArtifactStatus,
+        local_path: Option<&str>,
+    ) -> FeederResult<()>;
+    fn get_all(&self) -> FeederResult<Vec<ModArtifactRecord>>;
 }

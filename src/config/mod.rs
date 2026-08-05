@@ -8,6 +8,15 @@ pub struct Config {
     pub db_path: String,
     /// GitHub token used for release tracking (private repos + higher rate limits)
     pub github_token: Option<String>,
+    /// Where `mods run` mirrors registry metadata and downloaded artifacts
+    pub mod_mirror_dir: String,
+    /// Whether `feeder run` also mirrors the mod registry. Feeds and releases
+    /// are driven by database contents, so an empty database makes them
+    /// no-ops; the registry is a fixed remote, so without this switch a bare
+    /// `run` always reaches the network and downloads. Set `FEEDER_MODS=0` to
+    /// turn it off (`feeder mods run` still works — it was asked for
+    /// explicitly).
+    pub mods_enabled: bool,
 }
 
 impl Config {
@@ -45,12 +54,26 @@ impl Config {
 
         let github_token = Self::resolve_github_token();
 
+        // Relative by default, like the database and `getrepos`, so it lands in
+        // the systemd unit's WorkingDirectory rather than next to the binary.
+        let mod_mirror_dir = std::env::var("FEEDER_MOD_MIRROR")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "./modmirror".to_string());
+
+        let mods_enabled = std::env::var("FEEDER_MODS")
+            .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"))
+            .unwrap_or(true);
+
         Ok(Self {
             notebrook_url,
             notebrook_token,
             notebrook_channel,
             db_path,
             github_token,
+            mod_mirror_dir,
+            mods_enabled,
         })
     }
 

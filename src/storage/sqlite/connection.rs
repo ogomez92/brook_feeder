@@ -49,6 +49,24 @@ CREATE TABLE IF NOT EXISTS notified_releases (
 );
 
 CREATE INDEX IF NOT EXISTS idx_notified_releases_cache_key ON notified_releases(cache_key);
+
+CREATE TABLE IF NOT EXISTS mod_artifacts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cache_key TEXT NOT NULL UNIQUE,
+    kind TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    game_id TEXT NOT NULL DEFAULT '',
+    label TEXT NOT NULL DEFAULT '',
+    version TEXT NOT NULL DEFAULT '',
+    channel TEXT NOT NULL DEFAULT '',
+    url TEXT,
+    sha256 TEXT,
+    local_path TEXT,
+    status TEXT NOT NULL,
+    seen_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_mod_artifacts_cache_key ON mod_artifacts(cache_key);
 "#;
 
 #[derive(Clone)]

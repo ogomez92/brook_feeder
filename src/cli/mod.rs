@@ -1,3 +1,3 @@
 pub mod commands;
 
-pub use commands::{Cli, Commands, ReleaseCommands};
+pub use commands::{Cli, Commands, ModCommands, ReleaseCommands};

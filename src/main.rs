@@ -3,19 +3,20 @@ use std::fs;
 
 use clap::Parser;
 
-use feeder::cli::{Cli, Commands, ReleaseCommands};
+use feeder::cli::{Cli, Commands, ModCommands, ReleaseCommands};
 use feeder::config::Config;
-use feeder::domain::{Notification, RepoUpdate};
+use feeder::domain::{ArtifactStatus, Notification, RepoUpdate};
 use feeder::errors::{FeederError, FeederResult};
 use feeder::github::GithubClient;
+use feeder::modregistry::RegistryClient;
 use feeder::services::{
-    CloneOutcome, CloneService, FeedService, FetchService, ImportExportService,
-    NotificationService, ReleaseService,
+    CloneOutcome, CloneService, FeedService, FetchService, ImportExportService, MirrorOutcome,
+    ModMirrorService, NotificationService, ReleaseService,
 };
 use feeder::sources::SourceRegistry;
 use feeder::storage::sqlite::{
-    SqliteArticleCacheRepository, SqliteFeedRepository, SqliteReleaseCacheRepository,
-    SqliteRepoRepository, SqliteStorage,
+    SqliteArticleCacheRepository, SqliteFeedRepository, SqliteModArtifactRepository,
+    SqliteReleaseCacheRepository, SqliteRepoRepository, SqliteStorage,
 };
 
 fn main() {
@@ -46,9 +47,10 @@ fn run() -> FeederResult<()> {
         Commands::Import { path } => cmd_import(&path, feed_repo, source_registry),
         Commands::Export { output } => cmd_export(feed_repo, source_registry, output),
         Commands::Run { dry_run, skip_notify } => {
-            // A single `run` covers both feeds and GitHub releases so one timer
-            // handles everything. Run both independently: a failure in one is
-            // reported but must not skip the other (this runs silently).
+            // A single `run` covers feeds, GitHub releases, and the mod registry
+            // so one timer handles everything. Run each independently: a failure
+            // in one is reported but must not skip the others (this runs
+            // silently).
             let feeds_result =
                 cmd_run(feed_repo, cache_repo, source_registry, &config, dry_run, skip_notify);
             if let Err(e) = &feeds_result {
@@ -57,14 +59,32 @@ fn run() -> FeederResult<()> {
 
             println!("\n--- GitHub releases ---\n");
 
-            let releases_result = build_release_service(storage, &config)
+            let releases_result = build_release_service(storage.clone(), &config)
                 .and_then(|service| cmd_release_run(&service, &config, dry_run, skip_notify));
             if let Err(e) = &releases_result {
                 eprintln!("Releases run failed: {}", e);
             }
 
-            // Surface a non-zero exit if either half failed (after running both).
-            feeds_result.and(releases_result)
+            // Unlike feeds and releases, the registry is a fixed remote rather
+            // than a list in the database, so this step always reaches the
+            // network. `FEEDER_MODS=0` opts out.
+            let mods_result = if config.mods_enabled {
+                println!("\n--- Mod registry ---\n");
+
+                let result = build_mod_mirror_service(storage, &config, None).and_then(|service| {
+                    cmd_mods_run(&service, &config, dry_run, skip_notify, false)
+                });
+                if let Err(e) = &result {
+                    eprintln!("Mod registry run failed: {}", e);
+                }
+                result
+            } else {
+                println!("\n--- Mod registry: disabled (FEEDER_MODS=0) ---\n");
+                Ok(())
+            };
+
+            // Surface a non-zero exit if any part failed (after running them all).
+            feeds_result.and(releases_result).and(mods_result)
         }
         Commands::Releases { command } => {
             let service = build_release_service(storage, &config)?;
@@ -80,6 +100,22 @@ fn run() -> FeederResult<()> {
                 } => cmd_release_run(&service, &config, dry_run, skip_notify),
             }
         }
+        Commands::Mods { command } => match command {
+            ModCommands::Run {
+                dry_run,
+                skip_notify,
+                no_download,
+                dir,
+            } => {
+                let service = build_mod_mirror_service(storage, &config, dir)?;
+                cmd_mods_run(&service, &config, dry_run, skip_notify, no_download)
+            }
+            ModCommands::List => {
+                let service = build_mod_mirror_service(storage, &config, None)?;
+                cmd_mods_list(&service)
+            }
+        },
+
         Commands::GetRepos => {
             let service = build_release_service(storage, &config)?;
             cmd_get_repos(&service, &config)
@@ -96,6 +132,34 @@ fn build_release_service(
     let release_cache = SqliteReleaseCacheRepository::new(storage);
     let github = GithubClient::new(config.github_token.clone())?;
     Ok(ReleaseService::new(repo_repo, release_cache, github))
+}
+
+/// Build the mod-registry mirror service. `dir_override` comes from
+/// `--dir`; otherwise the configured mirror directory is used, resolved
+/// against the current directory the same way `getrepos` resolves `./repos`.
+fn build_mod_mirror_service(
+    storage: SqliteStorage,
+    config: &Config,
+    dir_override: Option<String>,
+) -> FeederResult<ModMirrorService<SqliteModArtifactRepository>> {
+    let artifact_repo = SqliteModArtifactRepository::new(storage);
+    let client = RegistryClient::new(config.github_token.clone())?;
+
+    let dir = dir_override
+        .map(|d| d.trim().to_string())
+        .filter(|d| !d.is_empty())
+        .unwrap_or_else(|| config.mod_mirror_dir.clone());
+
+    // Drop a leading `./` so the resolved path prints as /home/feeder/modmirror
+    // rather than /home/feeder/./modmirror.
+    let path = std::path::PathBuf::from(dir.strip_prefix("./").unwrap_or(&dir));
+    let mirror_dir = if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+
+    Ok(ModMirrorService::new(artifact_repo, client, mirror_dir))
 }
 
 fn cmd_add(
@@ -908,9 +972,245 @@ fn cmd_get_repos(service: &Releases, config: &Config) -> FeederResult<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Mod registry mirroring
+// ---------------------------------------------------------------------------
+
+type Mods = ModMirrorService<SqliteModArtifactRepository>;
+
+/// Pull the Accessibility Mod Manager registry, announce anything new, and
+/// mirror the artifacts it points at.
+///
+/// An artifact is announced exactly once — the first run it appears — and then
+/// downloaded. A download that fails leaves the artifact recorded as `pending`,
+/// so the next run retries the file without re-announcing it.
+fn cmd_mods_run(
+    service: &Mods,
+    config: &Config,
+    dry_run: bool,
+    skip_notify: bool,
+    no_download: bool,
+) -> FeederResult<()> {
+    println!("Pulling mod registry into {}...", service.mirror_dir().display());
+
+    // A dry run inspects the registry without writing snapshots to disk.
+    let discovery = service.discover(!dry_run)?;
+
+    for warning in &discovery.warnings {
+        eprintln!("  warning: {}", warning);
+    }
+
+    if discovery.artifacts.is_empty() {
+        println!("Registry lists no artifacts.");
+        return Ok(());
+    }
+
+    println!("Found {} artifacts in the registry.\n", discovery.artifacts.len());
+
+    let notification_service = if !dry_run && !skip_notify {
+        Some(NotificationService::new(config)?)
+    } else {
+        None
+    };
+
+    let mut new_count = 0;
+    let mut notified = 0;
+    let mut up_to_date = 0;
+    let mut downloaded = 0;
+    let mut already_on_disk = 0;
+    let mut gated = 0;
+    let mut retried = 0;
+    let mut failed: Vec<(String, String)> = Vec::new();
+
+    for artifact in &discovery.artifacts {
+        let existing = service.existing(artifact)?;
+
+        // Anything already mirrored (or known-gated) is settled.
+        if let Some(record) = &existing {
+            if record.status != ArtifactStatus::Pending {
+                up_to_date += 1;
+                continue;
+            }
+            retried += 1;
+        }
+
+        let is_new = existing.is_none();
+        let notification = Notification::from_mod_artifact(artifact);
+
+        if is_new {
+            new_count += 1;
+
+            if dry_run {
+                println!("  [DRY RUN] {}", notification.format());
+            } else if skip_notify {
+                println!("  [SKIP] {}", notification.format());
+                notified += 1;
+            } else {
+                print!("  Sending: {} {}... ", artifact.label, artifact.version);
+                io::stdout().flush()?;
+
+                match notification_service.as_ref().unwrap().send(&notification) {
+                    Ok(()) => {
+                        println!("OK");
+                        notified += 1;
+                    }
+                    Err(e) => {
+                        // Leave it unrecorded so the whole thing retries next run.
+                        println!("FAILED: {}", e);
+                        failed.push((artifact.cache_key(), e.to_string()));
+                        continue;
+                    }
+                }
+            }
+        }
+
+        if dry_run {
+            continue;
+        }
+
+        // Gated artifacts are recorded so they are never announced twice, but
+        // the bytes need a paid Patreon entitlement, so nothing is fetched.
+        let outcome = if artifact.gated {
+            MirrorOutcome::Gated
+        } else if no_download {
+            MirrorOutcome::Failed("skipped (--no-download)".to_string())
+        } else {
+            service.mirror(artifact)
+        };
+
+        let (status, path) = match outcome {
+            MirrorOutcome::Mirrored { path, bytes } => {
+                println!("    mirrored {} ({})", path, human_bytes(bytes));
+                downloaded += 1;
+                (ArtifactStatus::Mirrored, Some(path))
+            }
+            MirrorOutcome::AlreadyOnDisk { path } => {
+                already_on_disk += 1;
+                (ArtifactStatus::Mirrored, Some(path))
+            }
+            MirrorOutcome::Gated => {
+                gated += 1;
+                (ArtifactStatus::Gated, None)
+            }
+            MirrorOutcome::Failed(err) => {
+                if !no_download {
+                    println!("    download FAILED: {}", err);
+                    failed.push((artifact.cache_key(), err));
+                }
+                (ArtifactStatus::Pending, None)
+            }
+        };
+
+        service.record(artifact, status, path.as_deref())?;
+    }
+
+    println!();
+    println!(
+        "Registry: {} new, {} already known, {} pending retried.",
+        new_count, up_to_date, retried
+    );
+
+    if dry_run {
+        println!("Dry run complete. Would notify {} artifacts.", new_count);
+        return Ok(());
+    }
+
+    println!(
+        "Mirror: {} downloaded, {} already on disk, {} Patreon-gated (skipped), {} failed.",
+        downloaded,
+        already_on_disk,
+        gated,
+        failed.len()
+    );
+
+    if skip_notify {
+        println!("Marked {} artifacts as seen (notifications skipped).", notified);
+    } else {
+        println!("Notified {} artifacts.", notified);
+    }
+
+    if !failed.is_empty() {
+        println!("\nErrors:");
+        for (key, err) in &failed {
+            println!("  {}: {}", key, err);
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_mods_list(service: &Mods) -> FeederResult<()> {
+    let records = service.list()?;
+
+    if records.is_empty() {
+        println!("Nothing mirrored yet. Run `feeder mods run`.");
+        return Ok(());
+    }
+
+    println!("Mirror: {}\n", service.mirror_dir().display());
+
+    let mut current_kind = String::new();
+    for record in &records {
+        if record.kind != current_kind {
+            current_kind = record.kind.clone();
+            println!("[{}]", current_kind);
+        }
+
+        let scope = if record.game_id.is_empty() {
+            record.source_id.clone()
+        } else {
+            format!("{}/{}", record.source_id, record.game_id)
+        };
+
+        println!(
+            "  {} {} ({}) — {}",
+            scope,
+            record.version,
+            record.status.as_str(),
+            record.label
+        );
+
+        match (&record.local_path, record.status) {
+            (Some(path), _) => println!("    {}", path),
+            (None, ArtifactStatus::Gated) => {
+                println!("    Patreon-only — metadata recorded, file not mirrored")
+            }
+            (None, _) => println!("    not on disk yet"),
+        }
+    }
+
+    println!("\n{} artifacts tracked.", records.len());
+    Ok(())
+}
+
+/// Render a byte count for a progress line.
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+
+    if unit == 0 {
+        format!("{} {}", bytes, UNITS[unit])
+    } else {
+        format!("{:.1} {}", value, UNITS[unit])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_human_bytes() {
+        assert_eq!(human_bytes(512), "512 B");
+        assert_eq!(human_bytes(1536), "1.5 KB");
+        assert_eq!(human_bytes(2_648_396), "2.5 MB");
+    }
 
     #[test]
     fn test_parse_selection_basic() {

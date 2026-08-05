@@ -23,6 +23,14 @@ cargo run -- releases run --dry-run          # Preview without sending
 
 # Clone/update tracked repos to local disk (run manually, not in the timer)
 cargo run -- getrepos                         # Clone every tracked repo into ./repos/owner/name (pulls if already present)
+
+# Accessibility Mod Manager registry mirroring
+cargo run -- mods run                         # Pull registry, notify new artifacts, download them
+cargo run -- mods run --dry-run               # Preview without notifying, downloading, or recording
+cargo run -- mods run --skip-notify           # Mirror + record without notifying (use to seed a baseline)
+cargo run -- mods run --no-download           # Notify/record only; files fetched on a later run
+cargo run -- mods run --dir /path/to/mirror   # Override the mirror directory
+cargo run -- mods list                        # Show every artifact seen and where it landed
 ```
 
 ## Architecture
@@ -46,11 +54,14 @@ CLI (src/cli/) → Services (src/services/) → Sources/Storage (src/sources/, s
 - WordPress: Detects via `/wp-json/`, uses `/feed/` endpoint
 - Blogger: Detects `.blogspot.com`, uses `/feeds/posts/default`
 
-**Storage** (`src/storage/`): SQLite with four tables:
+**Storage** (`src/storage/`): SQLite with five tables:
 - `feeds`: Stores original URL, resolved feed URL, title, type, source
 - `notified_articles`: Cache keyed by `{feed_title}:{article_id}` for deduplication
 - `tracked_repos`: GitHub repos to watch for releases (owner, name, url); unique on `owner/name` (case-insensitive)
 - `notified_releases`: Cache keyed by `{owner}/{name}:release:{tag}` or `{owner}/{name}:commit:{sha}`
+- `mod_artifacts`: Mod-registry inventory + dedup cache, keyed by
+  `mod:{plugin}/{game}:{version}`, `dep:{id}:{version}`, or `manager:{owner}/{name}:{tag}`;
+  carries the mirror path and a `mirrored`/`gated`/`pending` status
 
 **Release Tracking** (`src/github/`, `src/services/release_service.rs`): Watches GitHub
 repositories and notifies new releases (falling back to the latest default-branch commit for
@@ -82,6 +93,38 @@ untouched. The GitHub token is injected into the URL only for the git invocation
 summary; one repo failing never aborts the rest. This is a **manual** command — deliberately not in
 `feeder run` or the timer.
 
+**Mod Registry Mirroring** (`src/modregistry/`, `src/services/mod_mirror_service.rs`): The
+Accessibility Mod Manager is closed-source, but the chain it reads to find mods is public, and
+`mods run` walks the same chain: the signed `plugin-registry.json` published as a GitHub release
+artifact → each plugin's `repoIndexUrl` → that author's per-game releases. It mirrors three kinds of
+artifact into `./modmirror` (override with `FEEDER_MOD_MIRROR` or `--dir`):
+
+- **mod packages** — `plugins/{plugin}/{game}/{version}/`
+- **dependencies** — the frameworks a mod installs on top of (BepInEx, MelonLoader, DSCSModLoader,
+  BizHawk) and game installers the registry points at, under `deps/{id}/{version}/`
+- **manager installer** — the app's own setup binary from its latest GitHub release, under
+  `manager/{tag}/`
+
+Registry metadata is snapshotted too (`registry/plugin-registry.json`, its `.sig`, and each
+`plugins/{id}/index.json`), so the metadata is archived and not just the payloads.
+
+Every download is verified against the publisher's SHA256 — from the index for mods and
+dependencies, from the release's `.sha256` sidecar for the installer (that file is BOM-prefixed;
+`parse_sidecar_hash` handles it, because failing to read it downgrades the download to unverified
+*silently*). Bytes land in a `.part` file and are renamed into place only after verification.
+
+**Announcing and mirroring are separate.** An artifact is announced once — the first run its
+`cache_key` is seen — then downloaded. A failed download records `pending` and is retried on later
+runs *without* re-notifying. Releases behind a paid Patreon tier (the server answers 401 without an
+entitlement) are recorded and announced as `gated` but never fetched, and their notification links
+to the author's site rather than a URL that would 401.
+
+Unlike feeds and releases, which are driven by database contents, the registry is a fixed remote —
+so this step always reaches the network. **`FEEDER_MODS=0` turns it off for `feeder run`** (an
+explicit `feeder mods run` still works). The integration tests set it, along with a temp
+`FEEDER_MOD_MIRROR`; without that, `cargo test` fetches the registry and downloads ~400 MB of mod
+artifacts into the repo.
+
 **Notebrook Integration** (`lib/`): Separate crate providing `ChannelClient` for sending messages to notebrook channels.
 
 ### Configuration
@@ -89,6 +132,8 @@ summary; one repo failing never aborts the rest. This is a **manual** command �
 Environment variables loaded from `.env`:
 - `NOTEBROOK_URL`, `NOTEBROOK_TOKEN`, `NOTEBROOK_CHANNEL`
 - Database stored at `./feeder.db` (configurable via `FEEDER_DB_PATH`)
+- `FEEDER_MOD_MIRROR`: mod-registry mirror directory (default `./modmirror`, gitignored)
+- `FEEDER_MODS`: set to `0`/`false`/`off`/`no` to drop the mod-registry step from `feeder run`
 
 ### Notification Format
 
@@ -115,6 +160,9 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now feeder.timer
 ```
 
-A single `feeder run` checks both feeds **and** GitHub releases, so the one
-`feeder.timer` covers everything. (`feeder releases run` still exists for
-running only the release check manually.)
+A single `feeder run` checks feeds, GitHub releases, **and** the mod registry, so the
+one `feeder.timer` covers everything. (`feeder releases run` and `feeder mods run`
+still exist for running one part manually.)
+
+Each part runs independently: a failure in one is reported but never skips the
+others, and `run` exits non-zero if any part failed.

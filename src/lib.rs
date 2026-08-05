@@ -3,6 +3,7 @@ pub mod config;
 pub mod domain;
 pub mod errors;
 pub mod github;
+pub mod modregistry;
 pub mod services;
 pub mod sources;
 pub mod storage;

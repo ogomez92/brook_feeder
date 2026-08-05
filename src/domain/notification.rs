@@ -1,4 +1,4 @@
-use super::{Article, Feed, RepoUpdate, TrackedRepo};
+use super::{Article, ArtifactKind, Feed, ModArtifact, RepoUpdate, TrackedRepo};
 
 #[derive(Debug, Clone)]
 pub struct Notification {
@@ -58,6 +58,36 @@ impl Notification {
                 })
             }
             RepoUpdate::None => None,
+        }
+    }
+
+    /// Build a notification for a newly seen mod-registry artifact.
+    ///
+    /// The link is the human-facing page (changelog, release, author site)
+    /// where the author published one. A Patreon-gated release is announced —
+    /// knowing a new beta exists is the useful part — but says so, and never
+    /// links straight at a URL that would answer 401.
+    pub fn from_mod_artifact(artifact: &ModArtifact) -> Self {
+        let descriptor = match artifact.kind {
+            ArtifactKind::ModPackage => match artifact.channel.trim() {
+                "" => "release".to_string(),
+                channel => format!("{} release", channel),
+            },
+            ArtifactKind::Dependency => "dependency update".to_string(),
+            ArtifactKind::Manager => "installer".to_string(),
+        };
+
+        let text = if artifact.gated {
+            "Patreon-only, not mirrored".to_string()
+        } else {
+            String::new()
+        };
+
+        Self {
+            feed_title: artifact.label.clone(),
+            article_title: format!("new {} {}", descriptor, artifact.version),
+            text,
+            links: artifact.best_link().map(str::to_string).into_iter().collect(),
         }
     }
 
@@ -174,6 +204,79 @@ mod tests {
         assert_eq!(
             notification.format(),
             "sveltejs/kit new release 1.2.3 https://github.com/sveltejs/kit/releases/latest"
+        );
+    }
+
+    #[test]
+    fn test_notification_from_mod_package_names_the_channel() {
+        use crate::domain::{ArtifactKind, ModArtifact};
+
+        let artifact = ModArtifact {
+            kind: ArtifactKind::ModPackage,
+            source_id: "amethyst".to_string(),
+            game_id: "masterduel".to_string(),
+            label: "Master Duel Access".to_string(),
+            version: "1.8".to_string(),
+            channel: "stable".to_string(),
+            url: Some("https://dl.example.com/md-v1.8-amm.zip".to_string()),
+            sha256: None,
+            gated: false,
+            page_url: None,
+        };
+
+        assert_eq!(
+            Notification::from_mod_artifact(&artifact).format(),
+            "Master Duel Access new stable release 1.8 https://dl.example.com/md-v1.8-amm.zip"
+        );
+    }
+
+    #[test]
+    fn test_notification_from_gated_artifact_says_so_and_omits_the_file() {
+        use crate::domain::{ArtifactKind, ModArtifact};
+
+        let artifact = ModArtifact {
+            kind: ArtifactKind::ModPackage,
+            source_id: "amethyst".to_string(),
+            game_id: "dscs".to_string(),
+            label: "Cyber Sleuth Access".to_string(),
+            version: "1.0-beta22".to_string(),
+            channel: "beta".to_string(),
+            url: Some("https://dl.example.com/gated.zip".to_string()),
+            sha256: None,
+            gated: true,
+            page_url: Some("https://accessibilitymods.com".to_string()),
+        };
+
+        let notification = Notification::from_mod_artifact(&artifact);
+        assert_eq!(notification.links, vec!["https://accessibilitymods.com"]);
+        assert_eq!(
+            notification.format(),
+            "Cyber Sleuth Access new beta release 1.0-beta22: Patreon-only, not mirrored \
+             https://accessibilitymods.com"
+        );
+    }
+
+    #[test]
+    fn test_notification_from_manager_installer() {
+        use crate::domain::{ArtifactKind, ModArtifact};
+
+        let artifact = ModArtifact {
+            kind: ArtifactKind::Manager,
+            source_id: "RealAmethyst/AccessibilityModManager".to_string(),
+            game_id: String::new(),
+            label: "Accessibility Mod Manager".to_string(),
+            version: "v1.17.0".to_string(),
+            channel: "stable".to_string(),
+            url: Some("https://example.com/Setup.exe".to_string()),
+            sha256: None,
+            gated: false,
+            page_url: Some("https://example.com/releases/tag/v1.17.0".to_string()),
+        };
+
+        assert_eq!(
+            Notification::from_mod_artifact(&artifact).format(),
+            "Accessibility Mod Manager new installer v1.17.0 \
+             https://example.com/releases/tag/v1.17.0"
         );
     }
 

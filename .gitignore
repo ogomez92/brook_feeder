@@ -4,3 +4,4 @@
 *.db
 *.opml
 *.json
+/modmirror

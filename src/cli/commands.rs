@@ -56,9 +56,40 @@ pub enum Commands {
         command: ReleaseCommands,
     },
 
+    /// Mirror the Accessibility Mod Manager registry and its release artifacts
+    Mods {
+        #[command(subcommand)]
+        command: ModCommands,
+    },
+
     /// Clone (or update) every tracked repo into ./repos/owner/name
     #[command(name = "getrepos", visible_alias = "get-repos")]
     GetRepos,
+}
+
+#[derive(Subcommand)]
+pub enum ModCommands {
+    /// Pull the registry, notify new artifacts, and mirror them to disk
+    Run {
+        /// Dry run - don't notify, download, or record anything
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Skip notifications but still mirror and record artifacts
+        #[arg(long)]
+        skip_notify: bool,
+
+        /// Record and notify new artifacts without downloading them
+        #[arg(long)]
+        no_download: bool,
+
+        /// Mirror directory (default: ./modmirror, or $FEEDER_MOD_MIRROR)
+        #[arg(long)]
+        dir: Option<String>,
+    },
+
+    /// List every artifact seen so far and where it landed
+    List,
 }
 
 #[derive(Subcommand)]
