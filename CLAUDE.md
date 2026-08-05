@@ -146,13 +146,14 @@ Environment variables loaded from `.env`:
 Service files in `services/` for running as a scheduled task:
 
 The service runs from `/home/feeder` (the repo checkout). `/home/feeder/feeder` — the path
-`feeder.service` execs — is a **symlink** to `target/release/feeder`, so a release build is
-picked up by the next timer run with no copy step. The symlink is gitignored; `cargo clean`
-or a debug-only build leaves it dangling until the next `cargo build --release`.
+`feeder.service` execs — is a **plain copy** of `target/release/feeder`, gitignored. Deploying
+means rebuilding *and* copying: a build alone changes nothing the timer runs. Do not turn it
+back into a symlink to `target/release/feeder`; that was tried and caused problems.
 
 ```bash
-# Deploy: just rebuild
+# Deploy: rebuild, then copy over the running binary
 cargo build --release
+cp target/release/feeder /home/feeder/feeder
 
 # Install and enable timer (runs every 120 min)
 sudo cp services/feeder.service services/feeder.timer /etc/systemd/system/

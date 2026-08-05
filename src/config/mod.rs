@@ -82,10 +82,10 @@ impl Config {
     /// Prefers an existing `feeder.db` in the current directory — that is what the
     /// docs promise and what the systemd unit's `WorkingDirectory` points at. Only
     /// falls back to one sitting next to the executable, and never *creates* one
-    /// there: `current_exe()` resolves symlinks, so for a deployment that symlinks
-    /// `feeder -> target/release/feeder` the exe directory is a build artifact
-    /// directory. Creating the database there silently strands the real one and the
-    /// run reports "No feeds configured" while still exiting 0.
+    /// there: `current_exe()` resolves symlinks, so whenever the binary is reached
+    /// through one the exe directory is a build artifact directory. Creating the
+    /// database there silently strands the real one and the run reports "No feeds
+    /// configured" while still exiting 0.
     fn default_db_path(exe_dir: Option<&std::path::Path>) -> String {
         let cwd_db = std::path::Path::new("feeder.db");
         if cwd_db.exists() {
