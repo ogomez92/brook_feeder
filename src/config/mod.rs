@@ -10,6 +10,10 @@ pub struct Config {
     pub github_token: Option<String>,
     /// Where `mods run` mirrors registry metadata and downloaded artifacts
     pub mod_mirror_dir: String,
+    /// Where `getrepos` clones tracked repositories (`owner/name` beneath it)
+    pub repos_dir: String,
+    /// How many repos `getrepos` syncs at once (`--jobs` overrides it)
+    pub repos_jobs: usize,
     /// Whether `feeder run` also mirrors the mod registry. Feeds and releases
     /// are driven by database contents, so an empty database makes them
     /// no-ops; the registry is a fixed remote, so without this switch a bare
@@ -62,6 +66,17 @@ impl Config {
             .filter(|v| !v.is_empty())
             .unwrap_or_else(|| "./modmirror".to_string());
 
+        // Same shape as the mirror directory: relative by default so it lands in
+        // the systemd unit's WorkingDirectory, absolute when pointed elsewhere
+        // (e.g. a mounted storage box).
+        let repos_dir = std::env::var("FEEDER_REPOS_DIR")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "./repos".to_string());
+
+        let repos_jobs = Self::parse_jobs(std::env::var("FEEDER_REPOS_JOBS").ok().as_deref());
+
         let mods_enabled = std::env::var("FEEDER_MODS")
             .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"))
             .unwrap_or(true);
@@ -73,8 +88,29 @@ impl Config {
             db_path,
             github_token,
             mod_mirror_dir,
+            repos_dir,
+            repos_jobs,
             mods_enabled,
         })
+    }
+
+    /// How many repos `getrepos` syncs concurrently.
+    ///
+    /// Syncing is latency-bound, not CPU- or bandwidth-bound: a `git status`
+    /// against a checkout on a network mount spends its time waiting on
+    /// per-file round trips, so overlapping repos is what makes a full run
+    /// finish in minutes instead of hours. 16 is a safe default even for a local
+    /// directory, where the work is dominated by GitHub round trips anyway.
+    /// Garbage and 0 fall back to the default rather than serializing the run
+    /// or spawning nothing.
+    fn parse_jobs(raw: Option<&str>) -> usize {
+        const DEFAULT_JOBS: usize = 16;
+
+        raw.map(str::trim)
+            .filter(|v| !v.is_empty())
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(DEFAULT_JOBS)
     }
 
     /// Locate the database when `FEEDER_DB_PATH` is unset.
@@ -125,5 +161,29 @@ impl Config {
                     Some(token)
                 }
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jobs_default_when_unset() {
+        assert_eq!(Config::parse_jobs(None), 16);
+    }
+
+    #[test]
+    fn jobs_honours_an_explicit_count() {
+        assert_eq!(Config::parse_jobs(Some("16")), 16);
+        assert_eq!(Config::parse_jobs(Some(" 3 ")), 3);
+    }
+
+    #[test]
+    fn jobs_falls_back_on_junk_or_zero() {
+        assert_eq!(Config::parse_jobs(Some("")), 16);
+        assert_eq!(Config::parse_jobs(Some("lots")), 16);
+        assert_eq!(Config::parse_jobs(Some("0")), 16);
+        assert_eq!(Config::parse_jobs(Some("-2")), 16);
     }
 }

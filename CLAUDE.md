@@ -22,7 +22,8 @@ cargo run -- releases run                     # Notify new releases (or latest c
 cargo run -- releases run --dry-run          # Preview without sending
 
 # Clone/update tracked repos to local disk (run manually, not in the timer)
-cargo run -- getrepos                         # Clone every tracked repo into ./repos/owner/name (pulls if already present)
+cargo run -- getrepos                         # Clone every tracked repo into $FEEDER_REPOS_DIR/owner/name (pulls if already present)
+cargo run -- getrepos --jobs 24               # Same, syncing 24 repos at a time (default 16)
 
 # Accessibility Mod Manager registry mirroring
 cargo run -- mods run                         # Pull registry, notify new artifacts, download them
@@ -84,14 +85,49 @@ The GitHub token comes from `GITHUB_TOKEN`, falling back to `gh auth token` (pri
 rate limits).
 
 **Local Checkouts** (`src/services/clone_service.rs`): The `getrepos` command clones every tracked
-repo to `./repos/owner/name` (relative to the current directory), mirroring the Release Tracker
-desktop app's "Update Repos" flow but without prompting for a folder. A repo not yet on disk is
-cloned; an existing one is `git pull --ff-only`'d; a working copy with uncommitted changes is left
-untouched. The GitHub token is injected into the URL only for the git invocation (and reset out of
-`origin` after clone) so private repos come down without the token being persisted to
-`.git/config`, and it's scrubbed from any displayed error. Each repo's outcome is printed with a
-summary; one repo failing never aborts the rest. This is a **manual** command — deliberately not in
+repo to `{FEEDER_REPOS_DIR}/owner/name` — default `./repos`, relative to the current directory, and
+on this host pointed at `/mnt/storagebox/repos` (the sshfs Hetzner storage box) to keep ~29 GB of
+checkouts off the local disk. Mirrors the Release Tracker desktop app's "Update Repos" flow but
+without prompting for a folder. A repo not yet on disk is cloned; an existing one is
+`git pull --ff-only`'d.
+
+These checkouts are an **archive**, not a workspace: a dirty working copy is reset
+(`git reset --hard` + `git clean -fd`, leaving `.gitignore`d files alone) and then pulled, rather
+than skipped — skipping froze a repo at whatever commit it was on when something first dirtied it.
+Each line reports what was thrown away (`updated (discarded 3 local changes)`) and the summary
+counts the affected checkouts.
+
+For the same reason the update is a `fetch` plus an explicit move, not `pull --ff-only`: when an
+author force pushes, the archived commits no longer exist upstream and there is no fast-forward to
+be had, so the checkout is **reset onto the fetched history** (reported as
+`updated (upstream history rewritten)`) instead of failing and freezing at a commit nobody else
+has.
+
+Network git commands are **retried** (3 attempts, backoff 3s × attempt) when the failure reads like
+a dropped transfer — `RPC failed`, `early EOF`, `fetch-pack: unexpected disconnect`, a reset
+connection, an unclean HTTP/2 stream. Cloning hundreds of repos at once over the storage box link
+hits these constantly, and one dropped transfer used to leave a repo missing from the archive until
+someone noticed. Failures that are the *server answering* — a deleted repo, a rejected token — are
+never retried, since the answer won't change. A clone that dies mid-transfer has its partial
+directory removed before the retry, and the summary counts what was retried.
+
+Repos that still lost their transfer after those retries are re-synced **one at a time after the
+parallel pass** (`[retry n/m]` lines), and the second outcome replaces the first in the tally. A
+dropped transfer under 16-24 jobs is the link being oversubscribed, not a broken repo: measured on
+the storage box, `amule-org/amule` (191 MB) fails every attempt alongside 23 other jobs and fetches
+in 2m07s with the link to itself.
+
+The GitHub token is injected into the URL only for the git invocation (and reset out of `origin`
+after clone) so private repos come down without the token being persisted to `.git/config`, and
+it's scrubbed from any displayed error. Each repo's outcome is printed with a summary; one repo
+failing never aborts the rest. This is a **manual** command — deliberately not in
 `feeder run` or the timer.
+
+Repos sync **concurrently** (`FEEDER_REPOS_JOBS`, `--jobs`, default 16): worker threads pull from a
+shared cursor and print each repo as it finishes, `[n/total]`-prefixed since completion order is no
+longer tracked-repo order. This matters most on the storage box — `git status`'s dirty check stats
+every file in a checkout, and over sshfs that is ~37s for a 3 MB repo cold while the GitHub fetch
+itself is under a second. Measured on the mount: ~30s/repo sequential, ~13s at 8 jobs, ~8s at 24.
 
 **Mod Registry Mirroring** (`src/modregistry/`, `src/services/mod_mirror_service.rs`): The
 Accessibility Mod Manager is closed-source, but the chain it reads to find mods is public, and
@@ -133,6 +169,9 @@ Environment variables loaded from `.env`:
 - `NOTEBROOK_URL`, `NOTEBROOK_TOKEN`, `NOTEBROOK_CHANNEL`
 - Database stored at `./feeder.db` (configurable via `FEEDER_DB_PATH`)
 - `FEEDER_MOD_MIRROR`: mod-registry mirror directory (default `./modmirror`, gitignored)
+- `FEEDER_REPOS_DIR`: where `getrepos` clones tracked repos (default `./repos`, gitignored);
+  absolute paths are used as-is, relative ones resolve against the working directory
+- `FEEDER_REPOS_JOBS`: how many repos `getrepos` syncs at once (default 16; `--jobs` overrides)
 - `FEEDER_MODS`: set to `0`/`false`/`off`/`no` to drop the mod-registry step from `feeder run`
 
 ### Notification Format

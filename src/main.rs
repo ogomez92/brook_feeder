@@ -1,5 +1,8 @@
 use std::io::{self, Write};
 use std::fs;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
+use std::thread;
 
 use clap::Parser;
 
@@ -116,9 +119,9 @@ fn run() -> FeederResult<()> {
             }
         },
 
-        Commands::GetRepos => {
+        Commands::GetRepos { jobs } => {
             let service = build_release_service(storage, &config)?;
-            cmd_get_repos(&service, &config)
+            cmd_get_repos(&service, &config, jobs)
         }
     }
 }
@@ -136,7 +139,7 @@ fn build_release_service(
 
 /// Build the mod-registry mirror service. `dir_override` comes from
 /// `--dir`; otherwise the configured mirror directory is used, resolved
-/// against the current directory the same way `getrepos` resolves `./repos`.
+/// the same way `getrepos` resolves its repository directory.
 fn build_mod_mirror_service(
     storage: SqliteStorage,
     config: &Config,
@@ -150,16 +153,21 @@ fn build_mod_mirror_service(
         .filter(|d| !d.is_empty())
         .unwrap_or_else(|| config.mod_mirror_dir.clone());
 
-    // Drop a leading `./` so the resolved path prints as /home/feeder/modmirror
-    // rather than /home/feeder/./modmirror.
-    let path = std::path::PathBuf::from(dir.strip_prefix("./").unwrap_or(&dir));
-    let mirror_dir = if path.is_absolute() {
-        path
-    } else {
-        std::env::current_dir()?.join(path)
-    };
+    Ok(ModMirrorService::new(artifact_repo, client, resolve_dir(&dir)?))
+}
 
-    Ok(ModMirrorService::new(artifact_repo, client, mirror_dir))
+/// Turn a configured directory into an absolute path: an absolute setting (a
+/// mounted storage box, say) is taken as-is, a relative one is resolved against
+/// the current directory — the systemd unit's `WorkingDirectory`. The leading
+/// `./` is dropped so the path prints as /home/feeder/repos rather than
+/// /home/feeder/./repos.
+fn resolve_dir(dir: &str) -> FeederResult<std::path::PathBuf> {
+    let path = std::path::PathBuf::from(dir.strip_prefix("./").unwrap_or(dir));
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Ok(std::env::current_dir()?.join(path))
+    }
 }
 
 fn cmd_add(
@@ -889,19 +897,27 @@ fn cmd_release_run(
     Ok(())
 }
 
-/// Clone (or update) every tracked repo into `./repos/owner/name`, mirroring the
-/// Release Tracker desktop app's "Update Repos" flow but without prompting for a
-/// destination. Uses the GitHub token so private repos come down, and reports
-/// each repo's outcome plus a summary — a single repo failing never aborts the
-/// rest.
-fn cmd_get_repos(service: &Releases, config: &Config) -> FeederResult<()> {
+/// Clone (or update) every tracked repo into `{FEEDER_REPOS_DIR}/owner/name`
+/// (default `./repos`), mirroring the Release Tracker desktop app's "Update
+/// Repos" flow but without prompting for a destination. Uses the GitHub token so
+/// private repos come down, and reports each repo's outcome plus a summary — a
+/// single repo failing never aborts the rest.
+///
+/// Repos are synced `jobs` at a time. The work is latency-bound — waiting on
+/// GitHub, and on per-file round trips when the checkouts live on a network
+/// mount — so overlapping them is the difference between a run that takes
+/// minutes and one that takes hours. Each thread claims the next repo from a
+/// shared cursor, so a slow repo doesn't hold up an idle worker, and lines are
+/// printed under one lock as each repo finishes: output arrives in completion
+/// order, never interleaved mid-line.
+fn cmd_get_repos(service: &Releases, config: &Config, jobs: Option<usize>) -> FeederResult<()> {
     let repos = service.list()?;
     if repos.is_empty() {
         println!("No repos tracked. Add one with `feeder releases add owner/name`.");
         return Ok(());
     }
 
-    let base_dir = std::env::current_dir()?.join("repos");
+    let base_dir = resolve_dir(&config.repos_dir)?;
 
     if config.github_token.is_none() {
         eprintln!(
@@ -910,66 +926,186 @@ fn cmd_get_repos(service: &Releases, config: &Config) -> FeederResult<()> {
         );
     }
 
+    // Never more threads than repos to sync.
+    let jobs = jobs.filter(|j| *j > 0).unwrap_or(config.repos_jobs).min(repos.len());
+
     println!(
-        "Cloning/updating {} repo(s) into {}\n",
+        "Cloning/updating {} repo(s) into {} ({} at a time)\n",
         repos.len(),
-        base_dir.display()
+        base_dir.display(),
+        jobs
     );
 
     let clone_service = CloneService::new(base_dir, config.github_token.clone());
 
-    let mut cloned = 0;
-    let mut updated = 0;
-    let mut up_to_date = 0;
-    let mut skipped = 0;
-    let mut failed: Vec<(String, String)> = Vec::new();
+    let next = AtomicUsize::new(0);
+    let progress = Mutex::new(SyncProgress::new(repos.len()));
+    // Repos whose transfer broke. Retried after the parallel pass rather than
+    // in place: a dropped transfer under this many jobs usually means the link
+    // is oversubscribed, and retrying inside the same crowd breaks the same
+    // way — a big repo that can't finish alongside 23 others finishes alone.
+    let oversubscribed = Mutex::new(Vec::new());
 
-    for repo in &repos {
-        print!("  {} ... ", repo.full_name());
-        io::stdout().flush()?;
+    thread::scope(|scope| {
+        for _ in 0..jobs {
+            scope.spawn(|| {
+                while let Some(repo) = repos.get(next.fetch_add(1, Ordering::Relaxed)) {
+                    let outcome = clone_service.sync(repo);
+                    let broke = matches!(&outcome, CloneOutcome::Failed(e) if CloneService::is_transient(e));
+                    progress.lock().unwrap().record(&repo.full_name(), outcome);
+                    if broke {
+                        oversubscribed.lock().unwrap().push(repo);
+                    }
+                }
+            });
+        }
+    });
 
-        match clone_service.sync(repo) {
-            CloneOutcome::Cloned => {
-                println!("cloned");
-                cloned += 1;
-            }
-            CloneOutcome::Updated => {
-                println!("updated");
-                updated += 1;
-            }
-            CloneOutcome::UpToDate => {
-                println!("up to date");
-                up_to_date += 1;
-            }
-            CloneOutcome::SkippedDirty => {
-                println!("skipped (uncommitted changes)");
-                skipped += 1;
-            }
-            CloneOutcome::Failed(err) => {
-                println!("FAILED: {}", err);
-                failed.push((repo.full_name(), err));
-            }
+    let mut progress = progress.into_inner().unwrap();
+    let retry = oversubscribed.into_inner().unwrap();
+
+    if !retry.is_empty() {
+        println!(
+            "\n{} repo(s) lost their transfer. Retrying one at a time:",
+            retry.len()
+        );
+        for (i, repo) in retry.iter().enumerate() {
+            let outcome = clone_service.sync(repo);
+            progress.record_retry(i + 1, retry.len(), &repo.full_name(), outcome);
         }
     }
 
-    println!();
-    println!(
-        "Done: {} cloned, {} updated, {} up-to-date, {} skipped, {} failed.",
-        cloned,
-        updated,
-        up_to_date,
-        skipped,
-        failed.len()
-    );
-
-    if !failed.is_empty() {
-        println!("\nErrors:");
-        for (name, err) in &failed {
-            println!("  {}: {}", name, err);
-        }
-    }
+    progress.report(clone_service.retries());
 
     Ok(())
+}
+
+/// Running tally of a `getrepos` run, printing each repo as it lands.
+struct SyncProgress {
+    total: usize,
+    done: usize,
+    cloned: usize,
+    updated: usize,
+    up_to_date: usize,
+    /// Repos whose local changes were thrown away to let the pull fast-forward.
+    discarded: usize,
+    /// Repos reset onto rewritten upstream history (an author force pushed).
+    rewound: usize,
+    failed: Vec<(String, String)>,
+}
+
+impl SyncProgress {
+    fn new(total: usize) -> Self {
+        Self {
+            total,
+            done: 0,
+            cloned: 0,
+            updated: 0,
+            up_to_date: 0,
+            discarded: 0,
+            rewound: 0,
+            failed: Vec::new(),
+        }
+    }
+
+    fn record(&mut self, name: &str, outcome: CloneOutcome) {
+        self.done += 1;
+        let status = self.tally(name, outcome);
+        // With several repos in flight the order is no longer the tracked-repo
+        // order, so each line carries its own counter to show progress.
+        println!("  [{}/{}] {} ... {}", self.done, self.total, name, status);
+        let _ = io::stdout().flush();
+    }
+
+    /// Record the sequential second attempt at a repo whose transfer broke
+    /// during the parallel pass. Whatever happens now is the repo's outcome:
+    /// the earlier failure is dropped from the tally rather than reported
+    /// alongside the success that replaced it.
+    fn record_retry(&mut self, nth: usize, of: usize, name: &str, outcome: CloneOutcome) {
+        self.failed.retain(|(failed, _)| failed != name);
+        let status = self.tally(name, outcome);
+        println!("  [retry {}/{}] {} ... {}", nth, of, name, status);
+        let _ = io::stdout().flush();
+    }
+
+    /// Count one repo's outcome and describe it for the run's output.
+    fn tally(&mut self, name: &str, outcome: CloneOutcome) -> String {
+        match outcome {
+            CloneOutcome::Cloned => {
+                self.cloned += 1;
+                "cloned".to_string()
+            }
+            CloneOutcome::Updated { discarded, rewound } => {
+                self.updated += 1;
+                let note = self.note_discarded(discarded);
+                if rewound {
+                    self.rewound += 1;
+                    format!("updated{} (upstream history rewritten)", note)
+                } else {
+                    format!("updated{}", note)
+                }
+            }
+            CloneOutcome::UpToDate { discarded } => {
+                self.up_to_date += 1;
+                format!("up to date{}", self.note_discarded(discarded))
+            }
+            CloneOutcome::Failed(err) => {
+                self.failed.push((name.to_string(), err.clone()));
+                format!("FAILED: {}", err)
+            }
+        }
+    }
+
+    /// Note local changes thrown away, and tally the repos it happened to — a
+    /// destructive step shouldn't pass by unmentioned even when it's the point.
+    fn note_discarded(&mut self, discarded: usize) -> String {
+        if discarded == 0 {
+            return String::new();
+        }
+
+        self.discarded += 1;
+        format!(
+            " (discarded {} local change{})",
+            discarded,
+            if discarded == 1 { "" } else { "s" }
+        )
+    }
+
+    fn report(&self, retries: usize) {
+        println!();
+        println!(
+            "Done: {} cloned, {} updated, {} up-to-date, {} failed.",
+            self.cloned,
+            self.updated,
+            self.up_to_date,
+            self.failed.len()
+        );
+
+        if self.discarded > 0 {
+            println!(
+                "{} checkout(s) had local changes discarded.",
+                self.discarded
+            );
+        }
+
+        if self.rewound > 0 {
+            println!(
+                "{} checkout(s) reset onto rewritten upstream history.",
+                self.rewound
+            );
+        }
+
+        if retries > 0 {
+            println!("Retried {} dropped transfer(s).", retries);
+        }
+
+        if !self.failed.is_empty() {
+            println!("\nErrors:");
+            for (name, err) in &self.failed {
+                println!("  {}: {}", name, err);
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

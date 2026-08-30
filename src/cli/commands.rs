@@ -62,9 +62,13 @@ pub enum Commands {
         command: ModCommands,
     },
 
-    /// Clone (or update) every tracked repo into ./repos/owner/name
+    /// Clone (or update) every tracked repo into $FEEDER_REPOS_DIR/owner/name
     #[command(name = "getrepos", visible_alias = "get-repos")]
-    GetRepos,
+    GetRepos {
+        /// Repos to sync at once (default: 16, or $FEEDER_REPOS_JOBS)
+        #[arg(short, long)]
+        jobs: Option<usize>,
+    },
 }
 
 #[derive(Subcommand)]
