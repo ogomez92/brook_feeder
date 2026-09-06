@@ -1,9 +1,10 @@
 use super::{Article, ArtifactKind, Feed, ModArtifact, ReleaseAsset, RepoUpdate, TrackedRepo};
 
-/// How many release assets a notification lists before it stops and points at
-/// the release page for the rest. Releases with a build per platform/arch can
-/// run to dozens of files; a message nobody can read through helps no one.
-const MAX_LISTED_ASSETS: usize = 15;
+/// How many of a release's files get their own message before the rest are
+/// summed up in a final one pointing at the release page. A release with a
+/// build per platform/arch can run to dozens of files, and a notification per
+/// file stops being a notification at some point.
+const MAX_ARTIFACT_MESSAGES: usize = 15;
 
 #[derive(Debug, Clone)]
 pub struct Notification {
@@ -11,17 +12,6 @@ pub struct Notification {
     pub article_title: String,
     pub text: String,
     pub links: Vec<String>,
-    /// Files to offer for download, each on its own line under the message.
-    /// Empty for everything except releases that ship assets.
-    pub downloads: Vec<Download>,
-}
-
-/// One directly downloadable file, named so the line says what it is before
-/// the URL says where it is.
-#[derive(Debug, Clone)]
-pub struct Download {
-    pub label: String,
-    pub url: String,
 }
 
 impl Notification {
@@ -33,25 +23,24 @@ impl Notification {
             article_title: article.title.clone(),
             text,
             links: article.links.clone(),
-            downloads: Vec::new(),
         }
     }
 
-    /// Build a notification for a tracked repo's latest release or commit.
-    /// Returns `None` when there is nothing to notify about.
+    /// Build the notifications for a tracked repo's latest release or commit —
+    /// one per message. Empty when there is nothing to notify about.
     ///
-    /// A release renders as `owner/name {releaseName}: {link}` and a commit as
-    /// `owner/name {commit subject} {link}`, reusing the same format shape as
-    /// article notifications. A release that ships files lists each of them
-    /// below, so a download is one click from the message rather than a trip
-    /// through the release page.
+    /// A release that ships files becomes **one message per file**, the file's
+    /// name first: `{file} ({size}) {owner/name} new release {title} {url}`.
+    /// Each message is then a single thing to download — the link goes straight
+    /// at the file, not at a page to hunt through — and the name leads so the
+    /// message says what it is before anything else. A release with no files,
+    /// and a commit, stay one message as before.
     ///
     /// Every release link points at `/releases/latest...` rather than the
-    /// tagged release, so opening an older notification still lands on the
-    /// newest release and pulls the newest build. (The trade-off: once a newer
-    /// release renames a file — most asset names carry the version — that
-    /// asset link 404s and the release page link above it is the way in.)
-    pub fn from_repo_update(repo: &TrackedRepo, update: &RepoUpdate) -> Option<Self> {
+    /// tagged release, so an older notification still pulls the newest build.
+    /// (The trade-off: once a newer release renames a file — most asset names
+    /// carry the version — that asset link 404s.)
+    pub fn from_repo_update(repo: &TrackedRepo, update: &RepoUpdate) -> Vec<Self> {
         match update {
             RepoUpdate::Release(release) => {
                 let title = if release.name.trim().is_empty() {
@@ -64,43 +53,51 @@ impl Notification {
                     repo.owner, repo.name
                 );
 
-                let mut downloads: Vec<Download> = release
+                // Nothing to download: announce the release itself.
+                if release.assets.is_empty() {
+                    return vec![Self {
+                        feed_title: repo.full_name(),
+                        article_title: format!("new release {}", title),
+                        text: String::new(),
+                        links: vec![page],
+                    }];
+                }
+
+                let headline = format!("{} new release {}", repo.full_name(), title);
+                let mut messages: Vec<Self> = release
                     .assets
                     .iter()
-                    .take(MAX_LISTED_ASSETS)
-                    .map(|asset| Download {
-                        label: format!("{} ({})", asset.name, human_size(asset.size)),
-                        url: latest_asset_url(&repo.owner, &repo.name, asset),
+                    .take(MAX_ARTIFACT_MESSAGES)
+                    .map(|asset| Self {
+                        feed_title: format!("{} ({})", asset.name, human_size(asset.size)),
+                        article_title: headline.clone(),
+                        text: String::new(),
+                        links: vec![latest_asset_url(&repo.owner, &repo.name, asset)],
                     })
                     .collect();
 
-                let listed = downloads.len();
-                if release.total_assets > listed {
-                    downloads.push(Download {
-                        label: format!("+{} more file(s)", release.total_assets - listed),
-                        url: page.clone(),
+                if release.total_assets > messages.len() {
+                    let left = release.total_assets - messages.len();
+                    messages.push(Self {
+                        feed_title: format!("+{} more file(s)", left),
+                        article_title: headline,
+                        text: String::new(),
+                        links: vec![page],
                     });
                 }
 
-                Some(Self {
-                    feed_title: repo.full_name(),
-                    article_title: format!("new release {}", title),
-                    text: String::new(),
-                    links: vec![page],
-                    downloads,
-                })
+                messages
             }
             RepoUpdate::Commit(commit) => {
                 let subject = commit.message.lines().next().unwrap_or("").trim().to_string();
-                Some(Self {
+                vec![Self {
                     feed_title: repo.full_name(),
                     article_title: "new commit".to_string(),
                     text: subject,
                     links: vec![commit.html_url.clone()],
-                    downloads: Vec::new(),
-                })
+                }]
             }
-            RepoUpdate::None => None,
+            RepoUpdate::None => Vec::new(),
         }
     }
 
@@ -131,12 +128,10 @@ impl Notification {
             article_title: format!("new {} {}", descriptor, artifact.version),
             text,
             links: artifact.best_link().map(str::to_string).into_iter().collect(),
-            downloads: Vec::new(),
         }
     }
 
-    /// Format: "{feedTitle} {articleTitle}: {text} {links (if any)}", then one
-    /// "{label} {url}" line per download when the update ships files.
+    /// Format: "{feedTitle} {articleTitle}: {text} {links (if any)}"
     pub fn format(&self) -> String {
         let mut message = format!("{} {}", self.feed_title, self.article_title);
 
@@ -148,13 +143,6 @@ impl Notification {
         if !self.links.is_empty() {
             message.push(' ');
             message.push_str(&self.links.join(" "));
-        }
-
-        if !self.downloads.is_empty() {
-            message.push_str("\nDownloads:");
-            for download in &self.downloads {
-                message.push_str(&format!("\n{} {}", download.label, download.url));
-            }
         }
 
         message
@@ -235,7 +223,6 @@ mod tests {
             article_title: "New Rust Features".to_string(),
             text: "Rust 1.75 introduces async traits".to_string(),
             links: vec!["https://example.com/post".to_string()],
-            downloads: Vec::new(),
         };
 
         let formatted = notification.format();
@@ -252,7 +239,6 @@ mod tests {
             article_title: "Title".to_string(),
             text: "Content".to_string(),
             links: vec![],
-            downloads: Vec::new(),
         };
 
         let formatted = notification.format();
@@ -266,7 +252,6 @@ mod tests {
             article_title: "Title".to_string(),
             text: String::new(),
             links: vec!["https://example.com".to_string()],
-            downloads: Vec::new(),
         };
 
         let formatted = notification.format();
@@ -314,14 +299,16 @@ mod tests {
             total_assets: 0,
         });
 
-        let notification = Notification::from_repo_update(&repo, &update).unwrap();
+        let messages = Notification::from_repo_update(&repo, &update);
 
+        // No files to offer: the release itself is the whole message.
+        assert_eq!(messages.len(), 1);
         assert_eq!(
-            notification.links,
+            messages[0].links,
             vec!["https://github.com/sveltejs/kit/releases/latest"]
         );
         assert_eq!(
-            notification.format(),
+            messages[0].format(),
             "sveltejs/kit new release 1.2.3 https://github.com/sveltejs/kit/releases/latest"
         );
     }
@@ -416,16 +403,17 @@ mod tests {
             html_url: "https://github.com/a/b/commit/abc123".to_string(),
         });
 
-        let notification = Notification::from_repo_update(&repo, &update).unwrap();
+        let messages = Notification::from_repo_update(&repo, &update);
 
+        assert_eq!(messages.len(), 1);
         assert_eq!(
-            notification.links,
+            messages[0].links,
             vec!["https://github.com/a/b/commit/abc123"]
         );
     }
 
     #[test]
-    fn test_notification_lists_release_assets_as_latest_downloads() {
+    fn test_each_release_file_is_its_own_message_named_first() {
         use crate::domain::{ReleaseAsset, RepoRelease, RepoUpdate, TrackedRepo};
 
         let repo = TrackedRepo::new(
@@ -458,21 +446,23 @@ mod tests {
             total_assets: 2,
         });
 
-        let notification = Notification::from_repo_update(&repo, &update).unwrap();
+        let messages = Notification::from_repo_update(&repo, &update);
 
+        assert_eq!(messages.len(), 2);
         assert_eq!(
-            notification.format(),
-            "sveltejs/kit new release 1.2.3 https://github.com/sveltejs/kit/releases/latest\n\
-             Downloads:\n\
-             kit-linux-x64.tar.gz (12 MB) \
-             https://github.com/sveltejs/kit/releases/latest/download/kit-linux-x64.tar.gz\n\
-             kit-setup.exe (914 KB) \
+            messages[0].format(),
+            "kit-linux-x64.tar.gz (12 MB) sveltejs/kit new release 1.2.3 \
+             https://github.com/sveltejs/kit/releases/latest/download/kit-linux-x64.tar.gz"
+        );
+        assert_eq!(
+            messages[1].format(),
+            "kit-setup.exe (914 KB) sveltejs/kit new release 1.2.3 \
              https://github.com/sveltejs/kit/releases/latest/download/kit-setup.exe"
         );
     }
 
     #[test]
-    fn test_notification_caps_the_asset_list_and_says_how_many_are_left() {
+    fn test_a_long_asset_list_stops_and_sums_up_the_rest() {
         use crate::domain::{ReleaseAsset, RepoRelease, RepoUpdate, TrackedRepo};
 
         let repo = TrackedRepo::new(
@@ -497,12 +487,13 @@ mod tests {
             total_assets: 42,
         });
 
-        let notification = Notification::from_repo_update(&repo, &update).unwrap();
+        let messages = Notification::from_repo_update(&repo, &update);
 
-        assert_eq!(notification.downloads.len(), MAX_LISTED_ASSETS + 1);
-        let last = notification.downloads.last().unwrap();
-        assert_eq!(last.label, "+27 more file(s)");
-        assert_eq!(last.url, "https://github.com/a/b/releases/latest");
+        assert_eq!(messages.len(), MAX_ARTIFACT_MESSAGES + 1);
+        assert_eq!(
+            messages.last().unwrap().format(),
+            "+27 more file(s) a/b new release v1 https://github.com/a/b/releases/latest"
+        );
     }
 
     #[test]

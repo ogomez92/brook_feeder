@@ -69,21 +69,26 @@ repositories and notifies new releases (falling back to the latest default-branc
 repos without releases). `GithubClient` bulk-fetches via the GraphQL API in batches of 30 aliased
 sub-queries, tolerant of missing/renamed repos and transient failures (retries + per-repo error
 isolation so a silent scheduled run never aborts wholesale). Notifications go to the same Notebrook
-channel as feeds, one message per release/commit with the link. Release messages link to
-`github.com/owner/name/releases/latest` (not the tagged release page) so an old notification still
-opens the newest release and its assets; commit messages link to the specific commit.
+channel as feeds. Every release link points at `github.com/owner/name/releases/latest...` (not the
+tagged release) so an old notification still opens the newest release and pulls the newest build;
+commit messages link to the specific commit.
 
-A release message then lists **each file the release ships**, one `name (size) url` line under a
-`Downloads:` header, so a build is one click from the notification instead of a trip through the
-release page. Those links are `releases/latest/download/{file}` — GitHub redirects them to the
-newest release's file of that name and serves it as an attachment, so the link keeps fetching the
-current build. (Trade-off: asset names usually carry the version, so once a newer release renames
-a file the old message's asset link 404s and its release-page link is the way in.) The filename is
-lifted from GitHub's own tag-pinned `downloadUrl` so its encoding is GitHub's, not ours. Assets come
-from `releaseAssets` in the same bulk GraphQL query (30 per repo); a message lists at most 15 and
-ends with a `+N more file(s)` line pointing at the release page. If a message is still too large for
-Notebrook, `NotificationService::send` drops the download list before giving up — the release link
-survives.
+A release that ships files sends **one message per file**, the file's name first:
+`{file} ({size}) {owner/name} new release {title} {url}`. Each message is then a single thing to
+download rather than a list to read through, and the link goes straight at the file — it is
+`releases/latest/download/{file}`, which GitHub redirects to the newest release's file of that name
+and serves as an attachment, so hitting it starts the download. (Trade-off: asset names usually
+carry the version, so once a newer release renames a file, that older message's link 404s.) The
+filename is lifted from GitHub's own tag-pinned `downloadUrl` so its encoding is GitHub's, not ours.
+Assets come from `releaseAssets` in the same bulk GraphQL query (30 per repo) — no extra requests. A
+release with no files, and a commit, stay one message as before.
+
+`Notification::from_repo_update` therefore returns a **`Vec`** — the messages for one update. At
+most 15 files get their own message; the rest are summed up by a final `+N more file(s)` message
+pointing at the release page. The dedup key stays the release/commit (`{owner}/{name}:release:{tag}`
+— *not* the file), so the switch to per-file messages did not re-announce anything already seen, and
+an update is marked notified only once every one of its messages is out: a half-sent release comes
+back whole next run, since some repeats beat a file that never arrives.
 
 The `releases import` command reads
 a Release Tracker JSON export (`releases.json`) — **only the `repos` array is used**; notified state

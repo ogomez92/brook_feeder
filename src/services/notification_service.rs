@@ -52,17 +52,6 @@ impl NotificationService {
         // Try with no text at all
         truncated.text = String::new();
         let message = truncated.format();
-        match self.client.send_message(&self.channel, &message) {
-            Ok(_) => return Ok(()),
-            Err(channels::ChannelError::PayloadTooLarge) => {}
-            Err(e) => return Err(e.into()),
-        }
-
-        // Still too large: the bulk must be the download list (a release with
-        // many assets). Drop it — the message keeps the release link, which
-        // leads to the same files.
-        truncated.downloads = Vec::new();
-        let message = truncated.format();
         self.client.send_message(&self.channel, &message)?;
         Ok(())
     }

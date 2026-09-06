@@ -813,6 +813,9 @@ fn cmd_release_run(
     let mut up_to_date = 0;
     let mut new_count = 0;
     let mut notified = 0;
+    // A release fans out into one message per file, so messages outnumber
+    // updates and the summary reports both.
+    let mut message_count = 0;
 
     for fetch in &fetches {
         let repo = &fetch.repo;
@@ -839,8 +842,11 @@ fn cmd_release_run(
             continue;
         }
 
-        let notification = match Notification::from_repo_update(repo, &fetch.update) {
-            Some(n) => n,
+        // A release ships one message per downloadable file, so an update is a
+        // set of messages rather than a single one.
+        let messages = Notification::from_repo_update(repo, &fetch.update);
+        let summary = match messages.first() {
+            Some(first) => first.article_title.clone(),
             None => continue,
         };
         new_count += 1;
@@ -853,22 +859,46 @@ fn cmd_release_run(
         let repo_id = repo.id.unwrap_or_default();
 
         if dry_run {
-            println!("  [DRY RUN] ({}) {}", kind, notification.format());
+            for message in &messages {
+                println!("  [DRY RUN] ({}) {}", kind, message.format());
+            }
+            message_count += messages.len();
         } else if skip_notify {
-            println!("  [SKIP] ({}) {}", kind, notification.format());
-            service.mark_notified(&cache_key, repo_id, &notification.article_title)?;
+            for message in &messages {
+                println!("  [SKIP] ({}) {}", kind, message.format());
+            }
+            service.mark_notified(&cache_key, repo_id, &summary)?;
             notified += 1;
+            message_count += messages.len();
         } else {
-            print!("  Sending ({}) {}... ", kind, repo.full_name());
+            print!(
+                "  Sending ({}) {} [{} message(s)]... ",
+                kind,
+                repo.full_name(),
+                messages.len()
+            );
             io::stdout().flush()?;
 
-            match notification_service.as_ref().unwrap().send(&notification) {
-                Ok(()) => {
-                    println!("OK");
-                    service.mark_notified(&cache_key, repo_id, &notification.article_title)?;
-                    notified += 1;
+            // The update is marked seen only once every one of its messages is
+            // out. The cache key is still the release/commit, not the file, so
+            // a half-sent release comes back whole on the next run — some
+            // repeats beat a file that never arrives.
+            let mut failure = None;
+            for message in &messages {
+                if let Err(e) = notification_service.as_ref().unwrap().send(message) {
+                    failure = Some(e);
+                    break;
                 }
-                Err(e) => {
+            }
+
+            match failure {
+                None => {
+                    println!("OK");
+                    service.mark_notified(&cache_key, repo_id, &summary)?;
+                    notified += 1;
+                    message_count += messages.len();
+                }
+                Some(e) => {
                     // Leave it unmarked so it retries next run.
                     println!("FAILED: {}", e);
                 }
@@ -887,11 +917,17 @@ fn cmd_release_run(
     );
 
     if dry_run {
-        println!("Dry run complete. Would notify {} updates.", new_count);
+        println!(
+            "Dry run complete. Would notify {} updates ({} messages).",
+            new_count, message_count
+        );
     } else if skip_notify {
-        println!("Marked {} updates as seen (notifications skipped).", notified);
+        println!(
+            "Marked {} updates as seen ({} messages skipped).",
+            notified, message_count
+        );
     } else {
-        println!("Notified {} updates.", notified);
+        println!("Notified {} updates ({} messages).", notified, message_count);
     }
 
     Ok(())
