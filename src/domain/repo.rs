@@ -25,6 +25,17 @@ impl TrackedRepo {
     }
 }
 
+/// A file published alongside a release (the binaries, installers and archives
+/// a user actually downloads).
+#[derive(Debug, Clone)]
+pub struct ReleaseAsset {
+    pub name: String,
+    /// GitHub's tag-pinned download URL, e.g.
+    /// `.../releases/download/v1.2.3/tool-linux.tar.gz`.
+    pub download_url: String,
+    pub size: u64,
+}
+
 /// The latest published release of a repository.
 #[derive(Debug, Clone)]
 pub struct RepoRelease {
@@ -33,6 +44,10 @@ pub struct RepoRelease {
     pub published_at: Option<String>,
     pub html_url: String,
     pub body: String,
+    /// Downloadable files attached to the release (capped at what the query
+    /// asks for; `total_assets` is how many there really are).
+    pub assets: Vec<ReleaseAsset>,
+    pub total_assets: usize,
 }
 
 /// The latest commit on a repository's default branch.
@@ -201,6 +216,8 @@ mod tests {
             published_at: None,
             html_url: "u".into(),
             body: String::new(),
+            assets: Vec::new(),
+            total_assets: 0,
         });
         assert_eq!(rel.cache_key(&repo).unwrap(), "a/b:release:v1.0");
 

@@ -11,7 +11,7 @@ use std::time::Duration;
 use reqwest::blocking::Client;
 use serde_json::Value;
 
-use crate::domain::{RepoCommit, RepoRelease, RepoUpdate, TrackedRepo};
+use crate::domain::{ReleaseAsset, RepoCommit, RepoRelease, RepoUpdate, TrackedRepo};
 use crate::errors::{FeederError, FeederResult};
 
 const GRAPHQL_URL: &str = "https://api.github.com/graphql";
@@ -20,6 +20,10 @@ const BATCH_SIZE: usize = 30;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
 /// Retries per batch on transient failures (network blips, GitHub 502s).
 const BATCH_ATTEMPTS: u32 = 3;
+/// How many release assets to pull per repo. Notifications list a subset of
+/// these; `totalCount` still reports the true number so a long asset list can
+/// say how many were left out.
+const ASSETS_PER_RELEASE: usize = 30;
 
 /// The result of fetching updates for a single repo.
 pub struct RepoFetch {
@@ -248,7 +252,13 @@ fn build_query(batch: &[TrackedRepo]) -> String {
         body.push_str(&format!(
             r#"
   repo{i}: repository(owner: {owner}, name: {name}) {{
-    latestRelease {{ tagName name publishedAt url description }}
+    latestRelease {{
+      tagName name publishedAt url description
+      releaseAssets(first: {assets}) {{
+        totalCount
+        nodes {{ name downloadUrl size }}
+      }}
+    }}
     defaultBranchRef {{
       target {{
         ... on Commit {{ oid message committedDate author {{ name }} url }}
@@ -256,6 +266,7 @@ fn build_query(batch: &[TrackedRepo]) -> String {
     }}
   }}"#,
             i = i,
+            assets = ASSETS_PER_RELEASE,
             owner = json_string(&repo.owner),
             name = json_string(&repo.name),
         ));
@@ -283,12 +294,15 @@ fn parse_update(rd: &Value) -> RepoUpdate {
         };
         let url = str_field(rel, "url");
         if !tag.is_empty() || !url.is_empty() {
+            let (assets, total_assets) = parse_release_assets(rel);
             return RepoUpdate::Release(RepoRelease {
                 tag_name: tag,
                 name,
                 published_at: opt_str_field(rel, "publishedAt"),
                 html_url: url,
                 body: str_field(rel, "description"),
+                assets,
+                total_assets,
             });
         }
     }
@@ -315,6 +329,41 @@ fn parse_update(rd: &Value) -> RepoUpdate {
     }
 
     RepoUpdate::None
+}
+
+/// Pull a release's attached files out of its `releaseAssets` connection,
+/// returning them plus GitHub's total count (which can exceed what we asked
+/// for). Assets keep the order GitHub returns them in — upload order.
+fn parse_release_assets(rel: &Value) -> (Vec<ReleaseAsset>, usize) {
+    let connection = match rel.get("releaseAssets").filter(|v| !v.is_null()) {
+        Some(c) => c,
+        None => return (Vec::new(), 0),
+    };
+
+    let mut assets = Vec::new();
+    if let Some(nodes) = connection.get("nodes").and_then(|n| n.as_array()) {
+        for node in nodes {
+            let name = str_field(node, "name");
+            let download_url = str_field(node, "downloadUrl");
+            if name.is_empty() || download_url.is_empty() {
+                continue;
+            }
+            assets.push(ReleaseAsset {
+                name,
+                download_url,
+                size: node.get("size").and_then(|v| v.as_u64()).unwrap_or(0),
+            });
+        }
+    }
+
+    let total = connection
+        .get("totalCount")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize)
+        .unwrap_or(assets.len())
+        .max(assets.len());
+
+    (assets, total)
 }
 
 /// Parse one page of an owner's `repositories` connection into `OwnedRepo`s,

@@ -71,8 +71,21 @@ sub-queries, tolerant of missing/renamed repos and transient failures (retries +
 isolation so a silent scheduled run never aborts wholesale). Notifications go to the same Notebrook
 channel as feeds, one message per release/commit with the link. Release messages link to
 `github.com/owner/name/releases/latest` (not the tagged release page) so an old notification still
-opens the newest release and its assets; commit messages link to the specific commit. The
-`releases import` command reads
+opens the newest release and its assets; commit messages link to the specific commit.
+
+A release message then lists **each file the release ships**, one `name (size) url` line under a
+`Downloads:` header, so a build is one click from the notification instead of a trip through the
+release page. Those links are `releases/latest/download/{file}` — GitHub redirects them to the
+newest release's file of that name and serves it as an attachment, so the link keeps fetching the
+current build. (Trade-off: asset names usually carry the version, so once a newer release renames
+a file the old message's asset link 404s and its release-page link is the way in.) The filename is
+lifted from GitHub's own tag-pinned `downloadUrl` so its encoding is GitHub's, not ours. Assets come
+from `releaseAssets` in the same bulk GraphQL query (30 per repo); a message lists at most 15 and
+ends with a `+N more file(s)` line pointing at the release page. If a message is still too large for
+Notebrook, `NotificationService::send` drops the download list before giving up — the release link
+survives.
+
+The `releases import` command reads
 a Release Tracker JSON export (`releases.json`) — **only the `repos` array is used**; notified state
 lives in the normal database, not the JSON.
 
