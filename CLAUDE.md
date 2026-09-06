@@ -18,6 +18,7 @@ cargo run -- releases import releases.json   # Import tracked repos (JSON is imp
 cargo run -- releases add owner/name         # Track a single repo (URL or owner/name)
 cargo run -- releases add @username          # List a user's/org's untracked repos, pick some (e.g. 1,2,3)
 cargo run -- releases list                   # List tracked repos
+cargo run -- releases remove amu             # Stop tracking (substring match; delete/rm/untrack alias it)
 cargo run -- releases run                     # Notify new releases (or latest commit if none)
 cargo run -- releases run --dry-run          # Preview without sending
 
@@ -93,6 +94,13 @@ back whole next run, since some repeats beat a file that never arrives.
 The `releases import` command reads
 a Release Tracker JSON export (`releases.json`) — **only the `repos` array is used**; notified state
 lives in the normal database, not the JSON.
+
+`releases remove <query>` (aliases `delete`, `rm`, `untrack`) stops tracking a repo: the query is a
+case-insensitive substring of `owner/name`, so `remove amu` finds `amule-org/amule`. One match is
+confirmed straight away, several are listed to pick from by number, and no query at all lists
+everything. Removing a repo also drops its `notified_releases` rows (the foreign key cascades, and
+`PRAGMA foreign_keys` is on), so re-adding it later announces its current release again — a message
+per file, for a repo that ships many.
 
 `releases add` accepts a single `owner/name`/URL, or `@username` to interactively bulk-add: it lists
 that user's/org's owned repos (via `repositoryOwner.repositories`, paginated) minus the ones already

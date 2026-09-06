@@ -18,6 +18,7 @@ pub enum Commands {
     },
 
     /// Remove a feed by name match (with confirmation), or interactively if no query
+    #[command(visible_aliases = ["delete", "rm"])]
     Remove {
         /// Part of the feed title or URL to match (omit to pick from the full list)
         query: Option<String>,
@@ -104,7 +105,8 @@ pub enum ReleaseCommands {
         repo: String,
     },
 
-    /// Remove a tracked repo by name match (with confirmation), or interactively if no query
+    /// Stop tracking a repo by name match (with confirmation), or interactively if no query
+    #[command(visible_aliases = ["delete", "rm", "untrack"])]
     Remove {
         /// Part of the repo name (owner/name) to match (omit to pick from the full list)
         query: Option<String>,
