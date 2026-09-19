@@ -8,7 +8,7 @@ use clap::Parser;
 
 use feeder::cli::{Cli, Commands, ModCommands, ReleaseCommands};
 use feeder::config::Config;
-use feeder::domain::{ArtifactStatus, Notification, RepoUpdate};
+use feeder::domain::{ArtifactStatus, Notification, RepoUpdate, RunReport};
 use feeder::errors::{FeederError, FeederResult};
 use feeder::github::GithubClient;
 use feeder::modregistry::RegistryClient;
@@ -53,41 +53,51 @@ fn run() -> FeederResult<()> {
             // A single `run` covers feeds, GitHub releases, and the mod registry
             // so one timer handles everything. Run each independently: a failure
             // in one is reported but must not skip the others (this runs
-            // silently).
-            let feeds_result =
-                cmd_run(feed_repo, cache_repo, source_registry, &config, dry_run, skip_notify);
-            if let Err(e) = &feeds_result {
+            // silently). Every error — a whole part bailing, a single feed or
+            // repo failing — lands in the report, which is posted to the
+            // channel at the end; only a notification that could not be posted
+            // makes the process exit non-zero.
+            let mut report = RunReport::new();
+
+            if let Err(e) = cmd_run(
+                feed_repo,
+                cache_repo,
+                source_registry,
+                &config,
+                dry_run,
+                skip_notify,
+                &mut report,
+            ) {
                 eprintln!("Feeds run failed: {}", e);
+                report.part_failed("feeds", e);
             }
 
             println!("\n--- GitHub releases ---\n");
 
-            let releases_result = build_release_service(storage.clone(), &config)
-                .and_then(|service| cmd_release_run(&service, &config, dry_run, skip_notify));
-            if let Err(e) = &releases_result {
+            if let Err(e) = build_release_service(storage.clone(), &config).and_then(|service| {
+                cmd_release_run(&service, &config, dry_run, skip_notify, &mut report)
+            }) {
                 eprintln!("Releases run failed: {}", e);
+                report.part_failed("releases", e);
             }
 
             // Unlike feeds and releases, the registry is a fixed remote rather
             // than a list in the database, so this step always reaches the
             // network. `FEEDER_MODS=0` opts out.
-            let mods_result = if config.mods_enabled {
+            if config.mods_enabled {
                 println!("\n--- Mod registry ---\n");
 
-                let result = build_mod_mirror_service(storage, &config, None).and_then(|service| {
-                    cmd_mods_run(&service, &config, dry_run, skip_notify, false)
-                });
-                if let Err(e) = &result {
+                if let Err(e) = build_mod_mirror_service(storage, &config, None).and_then(|service| {
+                    cmd_mods_run(&service, &config, dry_run, skip_notify, false, &mut report)
+                }) {
                     eprintln!("Mod registry run failed: {}", e);
+                    report.part_failed("mods", e);
                 }
-                result
             } else {
                 println!("\n--- Mod registry: disabled (FEEDER_MODS=0) ---\n");
-                Ok(())
-            };
+            }
 
-            // Surface a non-zero exit if any part failed (after running them all).
-            feeds_result.and(releases_result).and(mods_result)
+            finish_run(&report, &config, dry_run, skip_notify)
         }
         Commands::Releases { command } => {
             let service = build_release_service(storage, &config)?;
@@ -100,7 +110,16 @@ fn run() -> FeederResult<()> {
                 ReleaseCommands::Run {
                     dry_run,
                     skip_notify,
-                } => cmd_release_run(&service, &config, dry_run, skip_notify),
+                } => {
+                    let mut report = RunReport::new();
+                    if let Err(e) =
+                        cmd_release_run(&service, &config, dry_run, skip_notify, &mut report)
+                    {
+                        eprintln!("Releases run failed: {}", e);
+                        report.part_failed("releases", e);
+                    }
+                    finish_run(&report, &config, dry_run, skip_notify)
+                }
             }
         }
         Commands::Mods { command } => match command {
@@ -110,8 +129,14 @@ fn run() -> FeederResult<()> {
                 no_download,
                 dir,
             } => {
-                let service = build_mod_mirror_service(storage, &config, dir)?;
-                cmd_mods_run(&service, &config, dry_run, skip_notify, no_download)
+                let mut report = RunReport::new();
+                if let Err(e) = build_mod_mirror_service(storage, &config, dir).and_then(|service| {
+                    cmd_mods_run(&service, &config, dry_run, skip_notify, no_download, &mut report)
+                }) {
+                    eprintln!("Mod registry run failed: {}", e);
+                    report.part_failed("mods", e);
+                }
+                finish_run(&report, &config, dry_run, skip_notify)
             }
             ModCommands::List => {
                 let service = build_mod_mirror_service(storage, &config, None)?;
@@ -124,6 +149,66 @@ fn run() -> FeederResult<()> {
             cmd_get_repos(&service, &config, jobs)
         }
     }
+}
+
+/// Close out a run: post its errors to the channel as one message, and decide
+/// the exit status.
+///
+/// Errors in what a run *does* — a feed that would not parse, a repo GitHub
+/// would not answer for, the registry answering 504 — are reported, not
+/// fatal: they were already printed as they happened, and now they reach the
+/// channel too, where somebody actually looks. The run then exits 0.
+///
+/// Errors in *reporting* are the exception. A notification that could not be
+/// posted — an article, a release file, an artifact, or this report itself —
+/// exits 1: the channel is how problems get seen, so when it is unreachable
+/// the exit code is the only signal left. Nothing is lost either way: an item
+/// whose notification failed is not marked as seen, so it is re-sent next run.
+fn finish_run(
+    report: &RunReport,
+    config: &Config,
+    dry_run: bool,
+    skip_notify: bool,
+) -> FeederResult<()> {
+    let notification = match Notification::from_run_report(report) {
+        Some(notification) => notification,
+        None => return Ok(()),
+    };
+
+    println!();
+    eprintln!("Run finished with {} error(s):", report.error_count());
+    for line in report.lines() {
+        eprintln!("  {}", line);
+    }
+
+    if dry_run {
+        println!("  [DRY RUN] {}", notification.format());
+    } else if skip_notify {
+        println!("  [SKIP] {}", notification.format());
+    } else {
+        print!("  Sending error report... ");
+        io::stdout().flush()?;
+
+        match NotificationService::new(config).and_then(|service| service.send(&notification)) {
+            Ok(()) => println!("OK"),
+            Err(e) => {
+                println!("FAILED: {}", e);
+                return Err(FeederError::Notification(format!(
+                    "could not post the error report: {}",
+                    e
+                )));
+            }
+        }
+    }
+
+    if !report.notify_failures.is_empty() {
+        return Err(FeederError::Notification(format!(
+            "{} notification(s) could not be posted; they will be retried next run",
+            report.notify_failures.len()
+        )));
+    }
+
+    Ok(())
 }
 
 /// Build the release-tracking service from shared storage + config.
@@ -396,6 +481,7 @@ fn cmd_run(
     config: &Config,
     dry_run: bool,
     skip_notify: bool,
+    report: &mut RunReport,
 ) -> FeederResult<()> {
     let fetch_service = FetchService::new(feed_repo, cache_repo, source_registry);
 
@@ -419,11 +505,9 @@ fn cmd_run(
 
     for result in &results {
         if result.is_error() {
-            println!(
-                "  {}: error: {}",
-                result.feed.title,
-                result.error.as_ref().unwrap()
-            );
+            let error = result.error.as_ref().unwrap();
+            println!("  {}: error: {}", result.feed.title, error);
+            report.item_failed("feeds", &result.feed.title, error);
             error_count += 1;
         } else if result.has_new_articles() {
             println!(
@@ -500,7 +584,12 @@ fn cmd_run(
                     }
                     Err(e) => {
                         println!("FAILED: {}", e);
-                        // Don't add to notified_articles - will retry next run
+                        // Not added to notified_articles: it is re-sent next run.
+                        report.notify_failed(
+                            "feeds",
+                            format!("{}: {}", feed.title, article.title),
+                            e,
+                        );
                     }
                 }
             }
@@ -775,6 +864,7 @@ fn cmd_release_run(
     config: &Config,
     dry_run: bool,
     skip_notify: bool,
+    report: &mut RunReport,
 ) -> FeederResult<()> {
     let repos = service.list()?;
     if repos.is_empty() {
@@ -822,6 +912,7 @@ fn cmd_release_run(
 
         if let Some(err) = &fetch.error {
             println!("  {}: error: {}", repo.full_name(), err);
+            report.item_failed("releases", repo.full_name(), err);
             error_count += 1;
             continue;
         }
@@ -901,6 +992,7 @@ fn cmd_release_run(
                 Some(e) => {
                     // Leave it unmarked so it retries next run.
                     println!("FAILED: {}", e);
+                    report.notify_failed("releases", repo.full_name(), e);
                 }
             }
         }
@@ -1162,14 +1254,19 @@ fn cmd_mods_run(
     dry_run: bool,
     skip_notify: bool,
     no_download: bool,
+    report: &mut RunReport,
 ) -> FeederResult<()> {
     println!("Pulling mod registry into {}...", service.mirror_dir().display());
 
     // A dry run inspects the registry without writing snapshots to disk.
     let discovery = service.discover(!dry_run)?;
 
+    // A warning is a piece of the registry chain that could not be read — a
+    // plugin index, the signature, the manager release — so it is reported
+    // like any other error even though the rest of the registry went through.
     for warning in &discovery.warnings {
         eprintln!("  warning: {}", warning);
+        report.part_failed("mods", warning);
     }
 
     if discovery.artifacts.is_empty() {
@@ -1229,6 +1326,7 @@ fn cmd_mods_run(
                     Err(e) => {
                         // Leave it unrecorded so the whole thing retries next run.
                         println!("FAILED: {}", e);
+                        report.notify_failed("mods", artifact.cache_key(), &e);
                         failed.push((artifact.cache_key(), e.to_string()));
                         continue;
                     }
@@ -1267,6 +1365,7 @@ fn cmd_mods_run(
             MirrorOutcome::Failed(err) => {
                 if !no_download {
                     println!("    download FAILED: {}", err);
+                    report.item_failed("mods", artifact.cache_key(), &err);
                     failed.push((artifact.cache_key(), err));
                 }
                 (ArtifactStatus::Pending, None)

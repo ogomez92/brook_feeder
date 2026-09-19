@@ -3,10 +3,12 @@ pub mod article;
 pub mod notification;
 pub mod repo;
 pub mod mod_artifact;
+pub mod run_report;
 
 pub use feed::{Feed, FeedType, SourceType};
 pub use article::Article;
 pub use notification::Notification;
+pub use run_report::{RunError, RunReport};
 pub use repo::{
     parse_repo_input, ReleaseAsset, RepoCommit, RepoRelease, RepoUpdate, TrackedRepo,
 };

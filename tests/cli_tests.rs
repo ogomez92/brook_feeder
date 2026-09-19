@@ -183,3 +183,90 @@ mod mod_registry {
             .stdout(predicate::str::contains("Nothing mirrored yet"));
     }
 }
+
+/// How a run's errors are reported: as one message to the channel, with the
+/// process exiting 0 — unless that message (or any other notification) could
+/// not be posted, which is the one failure that still exits 1.
+mod error_reporting {
+    use super::*;
+    use feeder::domain::{Feed, FeedType, SourceType};
+    use feeder::storage::sqlite::{SqliteFeedRepository, SqliteStorage};
+    use feeder::storage::FeedRepository;
+
+    /// A Notebrook nobody is listening on. Port 9 (discard) is never bound
+    /// on a modern host, so posting there fails fast rather than hanging.
+    const DEAD_NOTEBROOK: &str = "http://127.0.0.1:9";
+
+    /// Seed the temp database with a feed whose URL refuses connections, so
+    /// the feeds part produces exactly one error without touching the network.
+    fn seed_broken_feed(temp_dir: &TempDir) {
+        let storage = SqliteStorage::new(temp_dir.path().join("test.db").to_str().unwrap()).unwrap();
+        let repo = SqliteFeedRepository::new(storage);
+        repo.add(&Feed::new(
+            "http://127.0.0.1:9/".to_string(),
+            "http://127.0.0.1:9/feed.xml".to_string(),
+            "Broken Feed".to_string(),
+            FeedType::Rss,
+            SourceType::RssAtom,
+        ))
+        .unwrap();
+    }
+
+    fn run_with_dead_notebrook(temp_dir: &TempDir, args: &[&str]) -> Command {
+        let mut cmd = isolated_run(temp_dir, args);
+        cmd.env("NOTEBROOK_URL", DEAD_NOTEBROOK);
+        cmd
+    }
+
+    /// A feed that fails is an error to report, not a reason to fail the run.
+    #[test]
+    fn test_part_errors_are_reported_and_exit_zero() {
+        let temp_dir = TempDir::new().unwrap();
+        seed_broken_feed(&temp_dir);
+
+        run_with_dead_notebrook(&temp_dir, &["--dry-run"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("Broken Feed: error:"))
+            .stdout(predicate::str::contains("[DRY RUN] Feeder run finished with 1 error"))
+            .stdout(predicate::str::contains("[feeds] Broken Feed:"));
+    }
+
+    /// The report is posted like any other notification, and a report that
+    /// cannot be posted is the failure the exit code is for.
+    #[test]
+    fn test_unpostable_error_report_exits_one() {
+        let temp_dir = TempDir::new().unwrap();
+        seed_broken_feed(&temp_dir);
+
+        run_with_dead_notebrook(&temp_dir, &[])
+            .assert()
+            .failure()
+            .stdout(predicate::str::contains("Sending error report... FAILED"))
+            .stderr(predicate::str::contains("could not post the error report"));
+    }
+
+    /// With nothing to report there is nothing to post, so an unreachable
+    /// Notebrook is not, by itself, a failure.
+    #[test]
+    fn test_clean_run_does_not_touch_notebrook() {
+        let temp_dir = TempDir::new().unwrap();
+
+        run_with_dead_notebrook(&temp_dir, &[])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("Sending error report").not());
+    }
+
+    /// `--skip-notify` skips the report too — it is a notification.
+    #[test]
+    fn test_skip_notify_prints_the_report_instead_of_posting() {
+        let temp_dir = TempDir::new().unwrap();
+        seed_broken_feed(&temp_dir);
+
+        run_with_dead_notebrook(&temp_dir, &["--skip-notify"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("[SKIP] Feeder run finished with 1 error"));
+    }
+}

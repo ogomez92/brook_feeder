@@ -231,4 +231,20 @@ one `feeder.timer` covers everything. (`feeder releases run` and `feeder mods ru
 still exist for running one part manually.)
 
 Each part runs independently: a failure in one is reported but never skips the
-others, and `run` exits non-zero if any part failed.
+others.
+
+**Errors are reported to the channel, not through the exit code.** Every error a run hits — a
+feed that would not parse, a repo GitHub would not answer for, the registry answering 504, a
+plugin index that could not be read, a download that failed — is collected in a `RunReport`
+(`src/domain/run_report.rs`) and posted at the end as **one** `Feeder run finished with N errors`
+message, one line per distinct error (the same error across many items, such as the GraphQL
+batch failing for every repo, folds into a single line naming the first three). The run then
+exits 0: nobody watches a timer's exit status, but somebody reads the channel. The same applies
+to `feeder releases run` and `feeder mods run` on their own.
+
+The one thing that still exits 1 is a **notification that could not be posted** — an article, a
+release file, an artifact, or the error report itself. The channel is the reporting path, so
+when it is down the exit code is the only signal left. Nothing is lost either way: an item whose
+notification failed is never marked as seen (articles, releases, and artifacts are all marked
+only after a successful send), so it is re-sent on the next run. `--dry-run` and
+`--skip-notify` print the report instead of posting it.
