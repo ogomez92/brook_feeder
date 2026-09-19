@@ -6,6 +6,7 @@ use url::Url;
 
 use crate::domain::{Article, Feed, SourceType};
 use crate::errors::{FeederError, FeederResult};
+use crate::sources::http;
 use crate::sources::traits::{FeedMetadata, FeedSource};
 use crate::sources::rss_atom::RssAtomSource;
 
@@ -126,7 +127,7 @@ impl FeedSource for MastodonSource {
 
     fn fetch_articles(&self, feed: &Feed) -> FeederResult<Vec<Article>> {
         // Fetch and parse the feed ourselves to handle Mastodon's title-less posts
-        let response = self.client.get(&feed.feed_url).send()?;
+        let response = http::get(&self.client, &feed.feed_url)?;
         let bytes = response.bytes()?;
         let parsed = parser::parse(&bytes[..])
             .map_err(|e| FeederError::FeedParse(e.to_string()))?;

@@ -4,6 +4,7 @@ use url::Url;
 
 use crate::domain::{Article, Feed, FeedType, SourceType};
 use crate::errors::{FeederError, FeederResult};
+use crate::sources::http;
 use crate::sources::traits::{FeedMetadata, FeedSource};
 
 /// Common feed URL patterns to try when direct URL fails
@@ -74,10 +75,21 @@ impl RssAtomSource {
     }
 
     fn fetch_and_parse(&self, url: &str) -> FeederResult<feed_rs::model::Feed> {
-        let response = self.client.get(url).send()?;
+        let response = http::get(&self.client, url)?;
+        let is_html = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.contains("html"));
         let bytes = response.bytes()?;
 
-        Self::parse_bytes(&bytes)
+        Self::parse_bytes(&bytes).map_err(|e| {
+            if is_html {
+                FeederError::FeedParse("got an HTML page, not a feed".to_string())
+            } else {
+                e
+            }
+        })
     }
 
     fn parse_bytes(bytes: &[u8]) -> FeederResult<feed_rs::model::Feed> {

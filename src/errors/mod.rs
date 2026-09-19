@@ -29,6 +29,9 @@ pub enum FeederError {
     #[error("HTTP request failed: {0}")]
     Http(#[from] reqwest::Error),
 
+    #[error("HTTP {0}")]
+    HttpStatus(reqwest::StatusCode),
+
     // GitHub / release tracking errors
     #[error("GitHub API error: {0}")]
     Github(String),

@@ -1,4 +1,5 @@
 pub mod traits;
+pub mod http;
 pub mod rss_atom;
 pub mod youtube;
 pub mod mastodon;

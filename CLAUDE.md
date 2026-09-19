@@ -51,10 +51,21 @@ CLI (src/cli/) → Services (src/services/) → Sources/Storage (src/sources/, s
 
 **Sources** (`src/sources/`): Each feed type implements the `FeedSource` trait. The `SourceRegistry` auto-detects source type from URL and routes to the appropriate handler. All sources delegate feed parsing to `RssAtomSource` after URL conversion.
 
-- YouTube: Converts `/@username` URLs to XML feed by scraping channel ID
+- YouTube: Converts `/@username` URLs to XML feed by scraping channel ID. YouTube's RSS server
+  goes down on its own for hours most mornings (~02:00–09:00 CEST, 404/500 for every channel)
+  while the site keeps serving, so when the feed fails `fetch_articles` reads the channel's
+  uploads playlist page (`playlist?list=UU…`) instead: same videos, same newest-first order,
+  shorts included. It takes exactly the **first 15** — the feed's size — with the feed's
+  `yt:video:{id}` IDs, so dedup lines up; reading further back would announce old videos that
+  never appeared in the feed (and so were never marked notified) as new. `validate` falls back
+  the same way, so a channel can be added during an outage.
 - Mastodon: Converts `instance/@user` to `.rss` endpoint
 - WordPress: Detects via `/wp-json/`, uses `/feed/` endpoint
 - Blogger: Detects `.blogspot.com`, uses `/feeds/posts/default`
+
+Every feed request goes through `sources::http::get`: one retry for a blip (connection error,
+timeout, 5xx, 429), and a non-2xx status is an `HTTP 404 Not Found` error rather than an error
+page handed to the feed parser (which reported it as `no root element`).
 
 **Storage** (`src/storage/`): SQLite with five tables:
 - `feeds`: Stores original URL, resolved feed URL, title, type, source
